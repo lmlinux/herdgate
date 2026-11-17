@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>herdr-web</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="side-head">
+        <span class="brand">herdr<b>-web</b></span>
+        <button id="btn-new" title="New terminal (runs this machine's default shell)">+ New</button>
+      </div>
+      <ul id="term-list">
+        <li class="empty">(no terminals yet)</li>
+      </ul>
+      <div id="conn-state" class="side-foot">connecting…</div>
+    </aside>
+    <main id="main">
+      <header id="topbar">
+        <span id="mode-badge" class="badge" hidden>👁 observe (read-only)</span>
+        <span id="term-title">(not attached)</span>
+        <span class="grow"></span>
+        <button id="btn-observe" title="Toggle observe mode: watch the output, but never type or resize">👁 Observe</button>
+        <button id="btn-kill" class="danger" title="End the program in the current terminal (terminal.kill)">kill</button>
+      </header>
+      <div id="term-container"></div>
+    </main>
+  </div>
+  <script>window.__TOKEN__ = "__HERDR_WEB_TOKEN__";</script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
