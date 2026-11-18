@@ -26,14 +26,13 @@ body {
 #sidebar {
   width: 280px;
   flex: none;
-  transition: margin-left 0.2s;
-}
-#sidebar.collapsed { margin-left: -280px; }
   display: flex;
   flex-direction: column;
   background: var(--panel);
   border-right: 1px solid var(--line);
+  transition: margin-left 0.2s;
 }
+#sidebar.collapsed { margin-left: -280px; }
 
 .side-head {
   display: flex;
