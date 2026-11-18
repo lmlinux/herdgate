@@ -1,12 +1,17 @@
 {
   "name": "herdgate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A tiny, hackable gateway and reference UI for herdr-core — persistent terminals in the browser via ghostty-web, framed protocol client, observe mode. Not a replacement for herdr's full clients.",
   "license": "MIT",
   "type": "module",
   "main": "server/gateway.mjs",
-  "bin": { "herdgate": "server/gateway.mjs" },
-  "files": ["server/", "web/"],
+  "bin": {
+    "herdgate": "server/gateway.mjs"
+  },
+  "files": [
+    "server/",
+    "web/"
+  ],
   "keywords": [
     "herdr",
     "herdr-core",
@@ -20,15 +25,22 @@
     "agent",
     "observe"
   ],
-  "repository": { "type": "git", "url": "git+https://github.com/lmlinux/herdgate.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lmlinux/herdgate.git"
+  },
   "homepage": "https://github.com/lmlinux/herdgate#readme",
-  "bugs": { "url": "https://github.com/lmlinux/herdgate/issues" },
+  "bugs": {
+    "url": "https://github.com/lmlinux/herdgate/issues"
+  },
   "scripts": {
     "start": "node server/gateway.mjs",
     "check": "node --check server/gateway.mjs && node --check web/app.js && node --check web/json-lines.js",
     "test": "node --test test/*.test.mjs"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "ghostty-web": "^0.4.0",
     "ws": "^8.18.0"
