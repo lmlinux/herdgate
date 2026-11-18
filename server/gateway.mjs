@@ -158,7 +158,8 @@ function loadStatic() {
     ['/', { body: Buffer.from(html, 'utf8'), type: 'text/html; charset=utf-8' }],
     ['/app.js', { body: readFileSync(path.join(WEB_ROOT, 'app.js')), type: 'text/javascript; charset=utf-8' }],
     ['/app.css', { body: readFileSync(path.join(WEB_ROOT, 'app.css')), type: 'text/css; charset=utf-8' }],
-    ['/json-lines.js', { body: readFileSync(path.join(WEB_ROOT, 'json-lines.js')), type: 'text/javascript; charset=utf-8' }],
+    // web/json-lines.js was removed (app.js imports from herdview now);
+    // herdview's json-lines is served at /vendor/json-lines.js below
     // herdview: serve from a sibling directory (dev) or node_modules (npm);
     // skip if neither exists (CI checkout has no sibling)
     ...((() => {
