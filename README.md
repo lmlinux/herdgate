@@ -76,7 +76,7 @@ npm run check
 npm test
 ```
 
-Covered: HTTP/WebSocket authentication, Origin and loopback Host checks, delayed handshakes, fragmented core frames, missing `hc`, and incremental JSON parsing (including split UTF-8 and frame-delimited JSON without a trailing newline).
+Covered: CLI help, occupied-port diagnostics, HTTP/WebSocket authentication, Origin and loopback Host checks, delayed handshakes, fragmented core frames, missing `hc`, and incremental JSON parsing (including split UTF-8 and frame-delimited JSON without a trailing newline).
 
 ## Layout
 
@@ -88,12 +88,20 @@ test/                # Node test suite and fake core fixture
 
 ## Protocol notes (for anyone hacking on this)
 
-- A connection starts in plain mode: one JSON-RPC message per line; `hello {"framed":true}` switches it to binary frames after its reply
-- Browser clients wait for the gateway's `{"type":"gateway","event":"ready"}` text message before sending RPC; messages received earlier are discarded
-- Frame: `[channel u32 LE][kind u8][len u32 LE][payload]`, payload ≤ 16 MiB
-- Channel 0 carries JSON-RPC; the channel returned by `terminal.attach` carries the first paint plus raw program output (DATA) from the core, and keys (DATA), size (RESIZE), focus (FOCUS), credit (CREDIT), goodbye (CLOSE) from the viewer
-- `events.subscribe` returns its own channel in framed mode; notifications arrive as JSON lines; a subscriber that falls behind gets `missed` with a fresh snapshot (replace your state wholesale)
-- Flow control: a stream starts with 256 KiB of credit; the viewer returns credit for consumed bytes; a viewer more than 4 MiB behind receives a fresh repaint instead of the backlog
+### Browser ↔ gateway
+
+- Text WebSocket frames are JSON-RPC requests. The gateway wraps each request in a channel 0 DATA frame; JSON-RPC responses arrive in channel 0 binary frames.
+- Browser clients wait for the gateway's `{"type":"gateway","event":"ready"}` text message before sending RPC; messages received earlier are discarded.
+- Binary WebSocket frames are opaque pass-through frames for attach streams. The page handles program output and input (DATA), flow control (CREDIT), size (RESIZE), focus (FOCUS), and goodbye (CLOSE).
+- The browser neither needs nor sends `hello`: the gateway has already completed the framed-mode handshake with herdr-core before announcing `ready`.
+
+### Gateway ↔ herdr-core
+
+- Each `hc connect` connection starts in plain mode with one JSON-RPC message per line. The gateway sends `hello {"framed":true}` and switches to binary frames after its reply.
+- Frame: `[channel u32 LE][kind u8][len u32 LE][payload]`, payload ≤ 16 MiB.
+- Channel 0 carries JSON-RPC. The channel returned by `terminal.attach` carries the first paint plus raw program output (DATA) from the core, and keys (DATA), size (RESIZE), focus (FOCUS), credit (CREDIT), goodbye (CLOSE) from the viewer.
+- `events.subscribe` returns its own channel in framed mode; notifications arrive as JSON lines; a subscriber that falls behind gets `missed` with a fresh snapshot (replace your state wholesale).
+- Flow control: a stream starts with 256 KiB of credit; the viewer returns CREDIT for consumed bytes to provide backpressure; a viewer more than 4 MiB behind receives a fresh repaint instead of the backlog.
 
 ## Roadmap
 

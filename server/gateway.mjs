@@ -30,6 +30,21 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
+if (process.argv.slice(2).some((arg) => arg === '--help' || arg === '-h')) {
+  process.stdout.write(`Usage: herdgate [--help]
+
+Options:
+  -h, --help       Show this help and exit
+
+Environment variables:
+  PORT             HTTP/WebSocket port (default: 8787)
+  HOST             Bind address (default: 127.0.0.1)
+  HC_CONNECT       Command used to connect to herdr-core (default: hc connect)
+  HERDR_WEB_TOKEN  Browser/WebSocket token (required for a non-loopback HOST)
+`);
+  process.exit(0);
+}
+
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_ROOT = path.join(__dirname, '..', 'web');
@@ -367,6 +382,15 @@ wss.on('connection', (ws) => {
       child.stdin.write(encodeFrame(0, KDATA, Buffer.from(JSON.stringify(msg) + '\n', 'utf8')));
     }
   });
+});
+
+server.once('error', (error) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`port ${PORT} in use; try PORT=${PORT + 1}`);
+  } else {
+    console.error(`gateway listen failed: ${error.message}`);
+  }
+  process.exit(1);
 });
 
 server.listen(PORT, HOST, () => {

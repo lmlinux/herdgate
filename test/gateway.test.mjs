@@ -154,6 +154,63 @@ test('non-loopback bind requires an explicit secret', async () => {
   assert.match(output, /HERDR_WEB_TOKEN/);
 });
 
+test('--help and -h print usage without starting the gateway', async () => {
+  for (const flag of ['--help', '-h']) {
+    const child = spawn(process.execPath, [gateway, flag], {
+      cwd: root,
+      env: {
+        ...process.env,
+        HOST: '127.0.0.1',
+        PORT: '8795',
+        HC_CONNECT: 'hc connect --session fixtest',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 5000,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (data) => { stdout += data; });
+    child.stderr.on('data', (data) => { stderr += data; });
+    const code = await new Promise((resolve) => child.once('exit', resolve));
+    assert.equal(code, 0, stderr);
+    assert.match(stdout, /Usage: herdgate/);
+    for (const name of ['PORT', 'HOST', 'HC_CONNECT', 'HERDR_WEB_TOKEN']) {
+      assert.match(stdout, new RegExp(`^\\s*${name}\\s+\\S`, 'm'));
+    }
+    assert.doesNotMatch(stdout, /gateway listening/);
+    assert.equal(stderr, '');
+  }
+});
+
+test('an occupied port produces a one-line actionable error', async (t) => {
+  const listener = net.createServer();
+  await new Promise((resolve, reject) => {
+    listener.once('error', reject);
+    listener.listen(8795, '127.0.0.1', resolve);
+  });
+  t.after(() => new Promise((resolve) => listener.close(resolve)));
+
+  const child = spawn(process.execPath, [gateway], {
+    cwd: root,
+    env: {
+      ...process.env,
+      HOST: '127.0.0.1',
+      PORT: '8795',
+      HC_CONNECT: 'hc connect --session fixtest',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 5000,
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (data) => { stdout += data; });
+  child.stderr.on('data', (data) => { stderr += data; });
+  const code = await new Promise((resolve) => child.once('exit', resolve));
+  assert.equal(code, 1, stderr);
+  assert.equal(stdout, '');
+  assert.equal(stderr, 'port 8795 in use; try PORT=8796\n');
+});
+
 test('RPC sent during a slow handshake never reaches the core', { timeout: 10000 }, async (t) => {
   const earlyFile = path.join(os.tmpdir(), `herdgate-early-${process.pid}-${Date.now()}`);
   const { port, token } = await startGateway(t, {
