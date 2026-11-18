@@ -70,6 +70,19 @@ historyToggle.onclick = () => {
   renderList();
 };
 $('sidebar').append(historyToggle);
+const clearBtn = document.createElement('button');
+clearBtn.id = 'btn-clear-finished';
+clearBtn.type = 'button';
+clearBtn.textContent = 'clear finished';
+clearBtn.style.cssText = historyToggle.style.cssText;
+clearBtn.onclick = async () => {
+  const finished = [...terms.values()].filter((t) => t.state === 'finished');
+  for (const t of finished) {
+    try { await connection.rpc('terminal.rm', { terminal: t.address }); } catch (e) { console.error(e); }
+  }
+  scheduleRender();
+};
+$('sidebar').append(clearBtn);
 
 const span = (text, cls) => {
   const s = document.createElement('span');
@@ -125,7 +138,6 @@ function renderList() {
 
 let currentView = null;
 let observePref = false;
-let nameSeq = 0;
 
 const termBox = $('term-container');
 
@@ -192,9 +204,8 @@ $('btn-observe').onclick = () => {
 };
 
 $('btn-new').onclick = async () => {
-  const name = 'web-' + ++nameSeq;
   try {
-    const rec = await connection.rpc('terminal.run', { name, size: { cols: 110, rows: 32 } });
+    const rec = await connection.rpc('terminal.run', { size: { cols: 110, rows: 32 } });
     if (rec?.address) {
       terms.set(rec.address, rec);
       scheduleRender();
