@@ -1,5 +1,5 @@
 /**
- * herdr-web frontend
+ * herdgate frontend
  *
  * The browser speaks herdr-core's framed protocol directly (the gateway only
  * authenticates and passes bytes through):

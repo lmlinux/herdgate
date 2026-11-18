@@ -1,4 +1,4 @@
-# herdr-web
+# herdgate
 
 **A tiny, hackable gateway and reference UI for [herdr-core](https://github.com/herdrdev/herdr-core)** — built for embedding, protocol learning, and trusted internal tools, not a replacement for herdr's full clients. Terminal rendering by [ghostty-web](https://github.com/coder/ghostty-web) (Ghostty's VT100 emulator compiled to WebAssembly).
 

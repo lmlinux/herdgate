@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * herdr-web gateway — the bridge between the browser and herdr-core
+ * herdgate gateway — the bridge between the browser and herdr-core
  *
  * Deliberately minimal:
  *   1. Serves the static frontend (with a same-origin WebSocket token)
@@ -370,7 +370,7 @@ wss.on('connection', (ws) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`herdr-web gateway listening: http://${HOST}:${PORT}/`);
+  console.log(`herdgate gateway listening: http://${HOST}:${PORT}/`);
   console.log(`  HC_CONNECT = ${HC_CONNECT}`);
   if (pageNeedsToken) console.log('  open /?token=HERDR_WEB_TOKEN (the configured secret is not logged)');
   else console.log(`  local per-run WebSocket token: ${TOKEN}`);

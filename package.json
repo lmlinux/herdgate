@@ -1,5 +1,5 @@
 {
-  "name": "herdr-web",
+  "name": "herdgate",
   "version": "0.1.0",
   "description": "Web client for herdr-core: persistent agent terminals in the browser, rendered by ghostty-web",
   "private": true,

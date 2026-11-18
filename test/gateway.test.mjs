@@ -155,7 +155,7 @@ test('non-loopback bind requires an explicit secret', async () => {
 });
 
 test('RPC sent during a slow handshake never reaches the core', { timeout: 10000 }, async (t) => {
-  const earlyFile = path.join(os.tmpdir(), `herdr-web-early-${process.pid}-${Date.now()}`);
+  const earlyFile = path.join(os.tmpdir(), `herdgate-early-${process.pid}-${Date.now()}`);
   const { port, token } = await startGateway(t, {
     FAKE_HANDSHAKE_DELAY: '300',
     FAKE_EARLY_FILE: earlyFile,
