@@ -91,10 +91,12 @@ function rpc(method, params) {
 ws.onopen = () => setConn('connected, subscribing…');
 ws.onerror = () => setConn('connection error', 'bad');
 ws.onclose = (e) => {
-  setConn(`disconnected${e.reason ? ': ' + e.reason : ''}`, 'bad');
+  setConn(`disconnected${e.reason ? ': ' + e.reason : ''} — reconnecting…`, 'bad');
   resolveGatewayReady(false);
   for (const [, p] of pending) p.reject(new Error('connection closed'));
   pending.clear();
+  // auto-reconnect: reload the page after 3 s (re-establishes WS + subscription)
+  setTimeout(() => location.reload(), 3000);
 };
 
 function handleJsonLine(line) {
