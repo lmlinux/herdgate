@@ -1,1 +1,0 @@
-../../herdview/index.js

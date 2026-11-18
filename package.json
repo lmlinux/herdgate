@@ -1,7 +1,7 @@
 {
   "name": "herdgate",
   "version": "0.2.0",
-  "description": "A tiny, hackable gateway and reference UI for herdr-core — persistent terminals in the browser via ghostty-web, framed protocol client, observe mode. Not a replacement for herdr's full clients.",
+  "description": "A tiny, hackable gateway and reference UI for herdr-core \u2014 persistent terminals in the browser via ghostty-web, framed protocol client, observe mode. Not a replacement for herdr's full clients.",
   "license": "MIT",
   "type": "module",
   "main": "server/gateway.mjs",
@@ -35,7 +35,7 @@
   },
   "scripts": {
     "start": "node server/gateway.mjs",
-    "check": "node --check server/gateway.mjs && node --check web/app.js && node --check web/json-lines.js",
+    "check": "node --check server/gateway.mjs && node --check web/app.js",
     "test": "node --test test/*.test.mjs"
   },
   "engines": {
