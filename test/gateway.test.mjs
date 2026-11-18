@@ -194,8 +194,10 @@ test('read-only connections are enforced at the protocol level', { timeout: 1000
   ws.send(encodeFrame(5, 0, Buffer.from('rm -rf /')));
   ws.send(encodeFrame(5, 1, Buffer.from('credit')));
   ws.send(encodeFrame(5, 3, Buffer.from('resize')));
-  await closeSocket(ws);
+  // let the core consume what it was sent BEFORE the socket close kills it
+  // (the gateway SIGTERMs the child on browser disconnect — a race otherwise)
   await delay(300);
+  await closeSocket(ws);
 
   const log = await readFile(logFile, 'utf8');
   assert.doesNotMatch(log, /terminal\.run/, 'blocked RPC reached the core');
@@ -212,12 +214,13 @@ test('read-only connections are enforced at the protocol level', { timeout: 1000
   assert.ok(JSON.parse((await ran).payload.toString('utf8')).result.address);
   wsRw.send(encodeFrame(5, 0, Buffer.from('input-ok')));
   wsRw.send(encodeFrame(5, 3, Buffer.from('resize-ok')));
-  await closeSocket(wsRw);
+  // consume before close kills the core (same race as above)
   await delay(300);
   const log2 = await readFile(logFile, 'utf8');
   assert.match(log2, /terminal\.run/);
   assert.match(log2, /input-ok/);
   assert.match(log2, /resize-ok/);
+  await closeSocket(wsRw);
   await rm(logFile);
 });
 
