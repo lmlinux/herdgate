@@ -217,6 +217,8 @@ async function attachTo(addr, { observe = observePref } = {}) {
 if (IS_RO) {
   $('btn-new').style.display = 'none';
   $('btn-kill').style.display = 'none';
+  // observe is locked on for read-only — the toggle must not offer a way out
+  $('btn-observe').style.display = 'none';
   $('mode-badge').hidden = false;
   $('mode-badge').textContent = '👁 read-only';
 }

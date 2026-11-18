@@ -122,6 +122,13 @@ const KCLOSE = 2;
 const KRESIZE = 3;
 const KFOCUS = 4;
 const KFACTS = 5;
+
+// read-only enforcement (fail-closed): the only JSON-RPC methods a read-only
+// connection may call, and the frame kinds it may never send. Input and resize
+// frames are dropped here, and terminal.attach is forced to observe:true —
+// herdr-core itself then rejects any input that slips past this list.
+const RO_RPC_ALLOW = new Set(['events.subscribe', 'terminal.list', 'terminal.attach']);
+const RO_BLOCKED_KINDS = new Set([KDATA, KRESIZE]);
 const KAUTO = 6;
 const HDR = 9; // [channel u32 LE][kind u8][len u32 LE]
 const MAX_PAYLOAD = 16 * 1024 * 1024; // protocol limit; oversized frames kill the link
@@ -270,7 +277,7 @@ server.on('upgrade', (req, socket, head) => {
       return refuse(socket, 403, 'Bad Origin');
     }
   }
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, role));
 });
 
 /** Handshake with hc connect: send a plain hello{framed:true} line,
@@ -319,7 +326,7 @@ function handshake(child, cb) {
 
 let connSeq = 0;
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, role = 'rw') => {
   const id = ++connSeq;
   const argv = HC_CONNECT.split(/\s+/).filter(Boolean);
   let child;
@@ -410,6 +417,9 @@ wss.on('connection', (ws) => {
       if (data.length < HDR || data.length > HDR + MAX_PAYLOAD) return;
       const len = data.readUInt32LE(5);
       if (HDR + len !== data.length) return;
+      // read-only: input (DATA) and resize frames never reach the core;
+      // CREDIT/CLOSE/FOCUS pass — flow control and clean detach must work
+      if (role === 'ro' && RO_BLOCKED_KINDS.has(data.readUInt8(4))) return;
       child.stdin.write(data);
     } else {
       // text = JSON-RPC request → wrapped as a channel 0 DATA frame
@@ -420,6 +430,25 @@ wss.on('connection', (ws) => {
         return;
       }
       if (!msg || typeof msg.method !== 'string' || msg.id == null) return;
+      if (role === 'ro') {
+        if (!RO_RPC_ALLOW.has(msg.method)) {
+          // fail-closed allowlist: refuse with a JSON-RPC error instead of
+          // forwarding, so the caller's promise rejects rather than hangs
+          log(`read-only: blocked ${msg.method}`);
+          if (ws.readyState === 1) {
+            ws.send(JSON.stringify({
+              jsonrpc: '2.0',
+              id: msg.id,
+              error: { code: -32000, message: `read-only: ${msg.method} is not permitted` },
+            }));
+          }
+          return;
+        }
+        if (msg.method === 'terminal.attach') {
+          // force observe:true — herdr-core rejects input on observe attachments
+          msg = { ...msg, params: { ...(msg.params || {}), observe: true } };
+        }
+      }
       child.stdin.write(encodeFrame(0, KDATA, Buffer.from(JSON.stringify(msg) + '\n', 'utf8')));
     }
   });

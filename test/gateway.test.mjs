@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { readFile, rm } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
@@ -92,6 +93,15 @@ const decodeFrame = (data) => ({
   payload: data.subarray(9),
 });
 
+const encodeFrame = (channel, kind, payload = Buffer.alloc(0)) => {
+  const frame = Buffer.alloc(9 + payload.length);
+  frame.writeUInt32LE(channel, 0);
+  frame.writeUInt8(kind, 4);
+  frame.writeUInt32LE(payload.length, 5);
+  payload.copy(frame, 9);
+  return frame;
+};
+
 const waitReady = (ws) => nextMessage(ws, (message) => message.event === 'ready');
 const closeSocket = (ws) => new Promise((resolve) => {
   ws.once('close', resolve);
@@ -154,6 +164,61 @@ test('read-only token yields a read-only page and socket', { timeout: 10000 }, a
   const ws = await openSocket(port, ro, { origin: `http://127.0.0.1:${port}` });
   await waitReady(ws);
   await closeSocket(ws);
+});
+
+test('read-only connections are enforced at the protocol level', { timeout: 10000 }, async (t) => {
+  const rw = 'test-rw-secret-that-is-not-logged';
+  const ro = 'test-ro-secret-that-is-not-logged';
+  const logFile = path.join(os.tmpdir(), `herdgate-ro-${process.pid}-${Date.now()}.log`);
+  const { port } = await startGateway(t, {
+    HERDR_WEB_TOKEN: rw,
+    HERDR_WEB_RO_TOKEN: ro,
+    FAKE_LOG_FILE: logFile,
+  });
+
+  const ws = await openSocket(port, ro, { origin: `http://127.0.0.1:${port}` });
+  await waitReady(ws);
+
+  // a write RPC is refused with a JSON-RPC error, never forwarded to the core
+  const blocked = nextMessage(ws, (m) => m && m.id === 101);
+  ws.send(JSON.stringify({ jsonrpc: '2.0', id: 101, method: 'terminal.run', params: {} }));
+  assert.match((await blocked).error.message, /read-only/);
+
+  // terminal.attach is forwarded with observe forced on — even if the client
+  // explicitly asks for a writable attachment (responses arrive as channel-0 frames)
+  const attached = nextMessage(ws, (m) => m.channel === 0 && m.payload.toString().includes('"id":102'));
+  ws.send(JSON.stringify({ jsonrpc: '2.0', id: 102, method: 'terminal.attach', params: { terminal: 't1', observe: false } }));
+  assert.equal(JSON.parse((await attached).payload.toString('utf8')).result.observe, true);
+
+  // binary input (DATA) and resize frames are dropped; CREDIT passes through
+  ws.send(encodeFrame(5, 0, Buffer.from('rm -rf /')));
+  ws.send(encodeFrame(5, 1, Buffer.from('credit')));
+  ws.send(encodeFrame(5, 3, Buffer.from('resize')));
+  await closeSocket(ws);
+  await delay(300);
+
+  const log = await readFile(logFile, 'utf8');
+  assert.doesNotMatch(log, /terminal\.run/, 'blocked RPC reached the core');
+  assert.match(log, /terminal\.attach/, 'allowed RPC did not reach the core');
+  assert.doesNotMatch(log, /rm -rf/, 'input frame reached the core');
+  assert.match(log, /^5 1 /m, 'CREDIT frame was dropped');
+  assert.doesNotMatch(log, /^5 3 /m, 'resize frame reached the core');
+
+  // full-access connections are unaffected: run, input and resize all pass
+  const wsRw = await openSocket(port, rw, { origin: `http://127.0.0.1:${port}` });
+  await waitReady(wsRw);
+  const ran = nextMessage(wsRw, (m) => m.channel === 0 && m.payload.toString().includes('"id":201'));
+  wsRw.send(JSON.stringify({ jsonrpc: '2.0', id: 201, method: 'terminal.run', params: {} }));
+  assert.ok(JSON.parse((await ran).payload.toString('utf8')).result.address);
+  wsRw.send(encodeFrame(5, 0, Buffer.from('input-ok')));
+  wsRw.send(encodeFrame(5, 3, Buffer.from('resize-ok')));
+  await closeSocket(wsRw);
+  await delay(300);
+  const log2 = await readFile(logFile, 'utf8');
+  assert.match(log2, /terminal\.run/);
+  assert.match(log2, /input-ok/);
+  assert.match(log2, /resize-ok/);
+  await rm(logFile);
 });
 
 test('non-loopback bind requires an explicit secret', async () => {

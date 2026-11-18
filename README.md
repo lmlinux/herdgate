@@ -44,7 +44,7 @@ PORT=8791 HOST=0.0.0.0 \
 ```
 
 - `?token=<HERDR_WEB_TOKEN>` — full access: attach, type, create, kill
-- `?token=<HERDR_WEB_RO_TOKEN>` — read-only: forced observe mode, no input, `+ New` and `kill` hidden, badge shows "read-only"
+- `?token=<HERDR_WEB_RO_TOKEN>` — read-only: forced observe mode, no input, `+ New`/`kill`/observe-toggle hidden, badge shows "read-only" — **enforced server-side**, not just UI
 
 Generate tokens with `openssl rand -hex 12`. No CLI, no config file, no registration.
 
@@ -90,7 +90,8 @@ The gateway serves herdview's files at `/vendor/herdview.js` (from a sibling dir
 
 - herdr-core is a single-user trust model: anyone who can reach its API can run commands. The gateway adds token auth, but is not a multi-user authorization system.
 - Default bind is `127.0.0.1`. Non-loopback binds require `HERDR_WEB_TOKEN` and should sit behind TLS.
-- The read-only token limits the browser UI, but the underlying hc protocol does not distinguish token roles — a determined user with the RO token and protocol knowledge could craft their own frames. For true isolation, use separate herdr-core sessions.
+- **Read-only is enforced at the gateway, not just the UI.** A read-only WebSocket may only call `events.subscribe`, `terminal.list`, and `terminal.attach` (fail-closed allowlist); its `terminal.attach` is rewritten with `observe: true` — herdr-core itself then rejects input for that attachment; and binary input (DATA) and resize frames from it are dropped before reaching the core (CREDIT/CLOSE still pass, so viewing and detaching work). A crafted read-only client cannot type, create, or kill.
+- Residual: a crafted read-only client could send a CLOSE frame on a channel it does not own and detach another viewer (annoyance, not command execution). For true isolation, use separate herdr-core sessions.
 
 ## Roadmap
 
