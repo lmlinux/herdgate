@@ -160,11 +160,12 @@ class FrameReader {
 // ------------------------------------------------------------- static files
 
 function loadStatic() {
-  const html = readFileSync(path.join(WEB_ROOT, 'index.html'), 'utf8')
-    .replace('__HERDR_WEB_TOKEN__', TOKEN)
-    .replace('__HERDR_WEB_RO_TOKEN__', RO_TOKEN);
+  // index.html stays a raw template: the token that authenticated the request
+  // is injected per-visit (see the GET handler), so a visitor using the
+  // read-only token gets a page locked to observe mode — never the full one.
+  const html = readFileSync(path.join(WEB_ROOT, 'index.html'), 'utf8');
   return new Map([
-    ['/', { body: Buffer.from(html, 'utf8'), type: 'text/html; charset=utf-8' }],
+    ['/', { body: Buffer.from(html, 'utf8'), type: 'text/html; charset=utf-8', template: true }],
     ['/app.js', { body: readFileSync(path.join(WEB_ROOT, 'app.js')), type: 'text/javascript; charset=utf-8' }],
     ['/app.css', { body: readFileSync(path.join(WEB_ROOT, 'app.css')), type: 'text/css; charset=utf-8' }],
     // web/json-lines.js was removed (app.js imports from herdview now);
@@ -213,17 +214,32 @@ const server = http.createServer((req, res) => {
     res.end('invalid host');
     return;
   }
-  if (u.pathname === '/' && pageNeedsToken && !tokenRole(u.searchParams.get('token'))) {
+  const role = u.pathname === '/' ? tokenRole(u.searchParams.get('token')) : null;
+  if (u.pathname === '/' && pageNeedsToken && !role) {
     res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
     res.end('unauthorized: append ?token=HERDR_WEB_TOKEN or ?token=HERDR_WEB_RO_TOKEN');
     return;
   }
+  let body = hit.body;
+  if (hit.template) {
+    // embed the token that authenticated this request: 'ro' visitors get the
+    // read-only token (frontend forces observe mode, hides new/kill); everyone
+    // else — including loopback with no configured tokens — gets the full one
+    const active = role === 'ro' ? RO_TOKEN : TOKEN;
+    body = Buffer.from(
+      hit.body
+        .toString('utf8')
+        .replace('__HERDR_WEB_TOKEN__', active)
+        .replace('__HERDR_WEB_RO_TOKEN__', RO_TOKEN),
+      'utf8',
+    );
+  }
   res.writeHead(200, {
     'content-type': hit.type,
     'cache-control': 'no-store',
-    'content-length': hit.body.length,
+    'content-length': body.length,
   });
-  res.end(hit.body);
+  res.end(body);
 });
 
 const wss = new WebSocketServer({ noServer: true });

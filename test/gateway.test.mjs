@@ -140,6 +140,22 @@ test('configured secret protects the token-bearing page', { timeout: 10000 }, as
   assert.equal(output().includes(secret), false);
 });
 
+test('read-only token yields a read-only page and socket', { timeout: 10000 }, async (t) => {
+  const rw = 'test-rw-secret-that-is-not-logged';
+  const ro = 'test-ro-secret-that-is-not-logged';
+  const { port } = await startGateway(t, { HERDR_WEB_TOKEN: rw, HERDR_WEB_RO_TOKEN: ro });
+  const rwHtml = await (await fetch(`http://127.0.0.1:${port}/?token=${rw}`)).text();
+  assert.match(rwHtml, new RegExp(`window\\.__TOKEN__ = "${rw}"`));
+  const roHtml = await (await fetch(`http://127.0.0.1:${port}/?token=${ro}`)).text();
+  // the RO page embeds the RO token, never the full one: the frontend uses the
+  // embedded token to detect read-only mode and to open the WebSocket
+  assert.match(roHtml, new RegExp(`window\\.__TOKEN__ = "${ro}"`));
+  assert.doesNotMatch(roHtml, new RegExp(rw));
+  const ws = await openSocket(port, ro, { origin: `http://127.0.0.1:${port}` });
+  await waitReady(ws);
+  await closeSocket(ws);
+});
+
 test('non-loopback bind requires an explicit secret', async () => {
   const port = await freePort();
   const child = spawn(process.execPath, [gateway], {
