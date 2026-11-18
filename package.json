@@ -3,10 +3,13 @@
   "version": "0.1.0",
   "description": "Web client for herdr-core: persistent agent terminals in the browser, rendered by ghostty-web",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "main": "server/gateway.mjs",
   "scripts": {
-    "start": "node server/gateway.mjs"
+    "start": "node server/gateway.mjs",
+    "check": "node --check server/gateway.mjs && node --check web/app.js && node --check web/json-lines.js",
+    "test": "node --test test/*.test.mjs"
   },
   "engines": {
     "node": ">=20"

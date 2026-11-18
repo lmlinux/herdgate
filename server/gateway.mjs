@@ -3,7 +3,7 @@
  * herdr-web gateway — the bridge between the browser and herdr-core
  *
  * Deliberately minimal:
- *   1. Serves the static frontend (with a per-run random same-origin token)
+ *   1. Serves the static frontend (with a same-origin WebSocket token)
  *   2. WebSocket auth (token + same-origin Origin check)
  *   3. One `hc connect` child process per WebSocket connection:
  *        - handshake: plain JSON line hello{framed:true} → binary frames after
@@ -17,13 +17,13 @@
  * hc connect comes from the HC_CONNECT env var, default "hc connect"
  * (the local core). Remote machine: HC_CONNECT="ssh box hc connect".
  *
- * Security: loopback bind by default; a non-loopback bind is guarded by the
- * token alone — put TLS / a reverse proxy in front yourself.
+ * Security: loopback bind by default; a non-loopback bind requires an explicit
+ * HERDR_WEB_TOKEN — put TLS / a reverse proxy in front yourself.
  */
 
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
@@ -44,11 +44,31 @@ const intEnv = (name, dflt) => {
 const PORT = intEnv('PORT', 8787);
 const HOST = process.env.HOST || '127.0.0.1';
 const HC_CONNECT = process.env.HC_CONNECT || 'hc connect';
-const TOKEN = randomBytes(24).toString('base64url');
-
 const isLoopback = (h) => h === '127.0.0.1' || h === '::1' || h === 'localhost';
+const configuredToken = process.env.HERDR_WEB_TOKEN || '';
+const TOKEN = configuredToken || randomBytes(24).toString('base64url');
+const pageNeedsToken = Boolean(configuredToken) || !isLoopback(HOST);
+const tokenMatches = (candidate) => {
+  if (typeof candidate !== 'string') return false;
+  const a = Buffer.from(TOKEN);
+  const b = Buffer.from(candidate);
+  return a.length === b.length && timingSafeEqual(a, b);
+};
+const validHost = (req) => {
+  if (!isLoopback(HOST)) return true;
+  try {
+    const hostname = new URL(`http://${req.headers.host || ''}`).hostname.replace(/^\[|\]$/g, '');
+    return isLoopback(hostname);
+  } catch {
+    return false;
+  }
+};
 if (!isLoopback(HOST)) {
-  console.warn(`[warn] HOST=${HOST} is not loopback: this gateway has only a token for protection. Put TLS and a reverse proxy in front before exposing it.`);
+  if (!configuredToken) {
+    console.error('HOST is not loopback; set HERDR_WEB_TOKEN to an explicit secret before starting.');
+    process.exit(1);
+  }
+  console.warn(`[warn] HOST=${HOST} is not loopback: use TLS and a trusted access-controlled network or reverse proxy.`);
 }
 
 // ------------------------------------------------- locate ghostty-web assets
@@ -123,6 +143,7 @@ function loadStatic() {
     ['/', { body: Buffer.from(html, 'utf8'), type: 'text/html; charset=utf-8' }],
     ['/app.js', { body: readFileSync(path.join(WEB_ROOT, 'app.js')), type: 'text/javascript; charset=utf-8' }],
     ['/app.css', { body: readFileSync(path.join(WEB_ROOT, 'app.css')), type: 'text/css; charset=utf-8' }],
+    ['/json-lines.js', { body: readFileSync(path.join(WEB_ROOT, 'json-lines.js')), type: 'text/javascript; charset=utf-8' }],
     ['/vendor/ghostty-web.js', { body: readFileSync(DIST_JS), type: 'text/javascript; charset=utf-8' }],
     // the vite build of ghostty-web.js imports this stub from its own directory
     ['/vendor/__vite-browser-external-2447137e.js', {
@@ -148,6 +169,16 @@ const server = http.createServer((req, res) => {
     res.end('not found');
     return;
   }
+  if (!validHost(req)) {
+    res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    res.end('invalid host');
+    return;
+  }
+  if (u.pathname === '/' && pageNeedsToken && !tokenMatches(u.searchParams.get('token'))) {
+    res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    res.end('unauthorized: append ?token=HERDR_WEB_TOKEN');
+    return;
+  }
   res.writeHead(200, {
     'content-type': hit.type,
     'cache-control': 'no-store',
@@ -171,7 +202,8 @@ server.on('upgrade', (req, socket, head) => {
     return refuse(socket, 400, 'Bad Request');
   }
   if (u.pathname !== '/ws') return refuse(socket, 404, 'Not Found');
-  if (u.searchParams.get('token') !== TOKEN) return refuse(socket, 401, 'Unauthorized');
+  if (!validHost(req)) return refuse(socket, 403, 'Invalid Host');
+  if (!tokenMatches(u.searchParams.get('token'))) return refuse(socket, 401, 'Unauthorized');
   const origin = req.headers.origin; // browsers always send it; non-browser clients may not
   if (origin) {
     try {
@@ -189,26 +221,44 @@ server.on('upgrade', (req, socket, head) => {
  *  read one reply line, then switch to binary frames. */
 function handshake(child, cb) {
   let acc = Buffer.alloc(0);
+  let done = false;
+  const finish = (err, leftover) => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    child.stdout.off('data', onData);
+    child.off('exit', onExit);
+    cb(err, leftover);
+  };
   const onData = (chunk) => {
     acc = Buffer.concat([acc, chunk]);
     const nl = acc.indexOf(0x0a);
-    if (nl === -1) return;
+    if (nl === -1) {
+      if (acc.length > 1024 * 1024) finish(new Error('hello reply is too large'));
+      return;
+    }
     const line = acc.subarray(0, nl).toString('utf8');
     const leftover = acc.subarray(nl + 1);
-    child.stdout.off('data', onData);
     let msg;
     try {
       msg = JSON.parse(line);
     } catch {
-      return cb(new Error('hello reply is not JSON'));
+      return finish(new Error('hello reply is not JSON'));
     }
-    if (msg.error) return cb(new Error(`core refused: ${JSON.stringify(msg.error)}`));
-    cb(null, leftover);
+    if (msg.error) return finish(new Error(`core refused: ${JSON.stringify(msg.error)}`));
+    finish(null, leftover);
   };
+  const onExit = () => finish(new Error('core exited during handshake'));
+  const timer = setTimeout(() => finish(new Error('core handshake timed out')), 10000);
   child.stdout.on('data', onData);
-  child.stdin.write(
-    JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'hello', params: { framed: true } }) + '\n',
-  );
+  child.once('exit', onExit);
+  try {
+    child.stdin.write(
+      JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'hello', params: { framed: true } }) + '\n',
+    );
+  } catch (e) {
+    finish(e);
+  }
 }
 
 let connSeq = 0;
@@ -224,6 +274,7 @@ wss.on('connection', (ws) => {
     return;
   }
   let alive = true;
+  let coreReady = false;
   const log = (...a) => console.log(`[conn ${id}]`, ...a);
   log(`core: ${HC_CONNECT} (pid ${child.pid})`);
 
@@ -246,11 +297,21 @@ wss.on('connection', (ws) => {
   });
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', (d) => process.stderr.write(`[conn ${id} hc] ${d}`));
-  child.on('error', (e) => log('child error', e.message));
+  child.stdin.on('error', (e) => log('core stdin error', e.message));
+  child.on('error', (e) => {
+    log('child error', e.message);
+    if (alive) {
+      alive = false;
+      try {
+        ws.close(1011, `core connection failed: ${e.message}`);
+      } catch {}
+    }
+  });
 
   handshake(child, (err, leftover) => {
     if (!alive) return;
     if (err) {
+      alive = false;
       log('handshake failed:', err.message);
       try {
         ws.close(1011, String(err.message));
@@ -281,12 +342,13 @@ wss.on('connection', (ws) => {
     };
     if (leftover && leftover.length) deliver(leftover);
     child.stdout.on('data', deliver);
+    coreReady = true;
     log('framed mode established');
     if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'gateway', event: 'ready' }));
   });
 
   ws.on('message', (data, isBinary) => {
-    if (!alive || child.stdin.destroyed) return;
+    if (!alive || !coreReady || child.stdin.destroyed) return;
     if (isBinary) {
       // an hc frame from the browser: length-check, then pass through as-is
       if (data.length < HDR || data.length > HDR + MAX_PAYLOAD) return;
@@ -310,5 +372,6 @@ wss.on('connection', (ws) => {
 server.listen(PORT, HOST, () => {
   console.log(`herdr-web gateway listening: http://${HOST}:${PORT}/`);
   console.log(`  HC_CONNECT = ${HC_CONNECT}`);
-  console.log(`  token (injected into the same-origin page; also needed for a direct /ws): ${TOKEN}`);
+  if (pageNeedsToken) console.log('  open /?token=HERDR_WEB_TOKEN (the configured secret is not logged)');
+  else console.log(`  local per-run WebSocket token: ${TOKEN}`);
 });

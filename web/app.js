@@ -14,6 +14,7 @@
  */
 
 import { init, Terminal, FitAddon } from '/vendor/ghostty-web.js';
+import { createJsonLineParser } from '/json-lines.js';
 
 const TOKEN = window.__TOKEN__;
 const enc = new TextEncoder();
@@ -68,6 +69,10 @@ let nextId = 1;
 const pending = new Map(); // id -> {resolve, reject}
 const roles = new Map();   // channel -> {type:'events'} | {type:'attach', addr, observe}
 const terms = new Map();   // address -> Terminal record
+const jsonParsers = new Map(); // channel -> incremental JSON-lines parser
+let resolveGatewayReady;
+const gatewayReady = new Promise((resolve) => { resolveGatewayReady = resolve; });
+let gatewayIsReady = false;
 
 function rpc(method, params) {
   return new Promise((resolve, reject) => {
@@ -87,16 +92,41 @@ ws.onopen = () => setConn('connected, subscribing…');
 ws.onerror = () => setConn('connection error', 'bad');
 ws.onclose = (e) => {
   setConn(`disconnected${e.reason ? ': ' + e.reason : ''}`, 'bad');
+  resolveGatewayReady(false);
   for (const [, p] of pending) p.reject(new Error('connection closed'));
   pending.clear();
 };
+
+function handleJsonLine(line) {
+  if (!line.trim()) return;
+  let msg;
+  try {
+    msg = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (msg.id != null) {
+    const p = pending.get(msg.id);
+    if (p) {
+      pending.delete(msg.id);
+      if (msg.error) p.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+      else p.resolve(msg.result);
+    }
+  } else if (msg.method) {
+    handleNotification(msg);
+  }
+}
 
 ws.onmessage = (ev) => {
   if (typeof ev.data === 'string') {
     // gateway control messages
     try {
       const c = JSON.parse(ev.data);
-      if (c.type === 'gateway' && c.event === 'ready') setConn('ready');
+      if (c.type === 'gateway' && c.event === 'ready') {
+        gatewayIsReady = true;
+        setConn('ready');
+        resolveGatewayReady(true);
+      }
     } catch {}
     return;
   }
@@ -127,26 +157,12 @@ ws.onmessage = (ev) => {
 
   if (kind !== KDATA) return;
   // channel 0 (RPC replies) and the events channel: JSON lines
-  const text = dec.decode(payload);
-  for (const line of text.split('\n')) {
-    if (!line.trim()) continue;
-    let msg;
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (msg.id != null) {
-      const p = pending.get(msg.id);
-      if (p) {
-        pending.delete(msg.id);
-        if (msg.error) p.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
-        else p.resolve(msg.result);
-      }
-    } else if (msg.method) {
-      handleNotification(msg);
-    }
+  let parse = jsonParsers.get(channel);
+  if (!parse) {
+    parse = createJsonLineParser(handleJsonLine);
+    jsonParsers.set(channel, parse);
   }
+  parse(payload);
   sendFrame(channel, KCREDIT, creditBytes(payload.byteLength)); // the event stream needs credit too
 };
 
@@ -245,6 +261,7 @@ function statusOf(t) {
 
 function renderList() {
   const ul = $('term-list');
+  if (gatewayIsReady && ws.readyState === 1) setConn(`ready · ${terms.size} terminal(s)`, 'ok');
   ul.innerHTML = '';
   const arr = [...terms.values()].sort((a, b) => (a.created_ms || 0) - (b.created_ms || 0));
   if (!arr.length) {
@@ -284,6 +301,7 @@ function renderList() {
 let cur = null; // {channel, addr, term, fit, observe}
 let observePref = false;
 let nameSeq = 0;
+let attachSeq = 0;
 
 const termBox = $('term-container');
 
@@ -304,6 +322,7 @@ function detachCurrent() {
 }
 
 async function attachTo(addr, { observe = observePref } = {}) {
+  const seq = ++attachSeq;
   detachCurrent();
   termBox.innerHTML = '';
   setTitle(`${addr} · attaching…`);
@@ -352,12 +371,19 @@ async function attachTo(addr, { observe = observePref } = {}) {
       observe,
     });
   } catch (e) {
+    fit.dispose();
     term.dispose();
-    setTitle(`${addr} · attach failed: ${e.message}`);
+    if (seq === attachSeq) setTitle(`${addr} · attach failed: ${e.message}`);
     return;
   }
 
-  cur = { channel: res.channel, addr, term, fit, observe };
+  if (seq !== attachSeq) {
+    sendFrame(res.channel, KCLOSE, new Uint8Array(0));
+    fit.dispose();
+    term.dispose();
+    return;
+  }
+  cur = { type: 'attach', channel: res.channel, addr, term, fit, observe };
   roles.set(res.channel, cur);
   if (res.terminal) {
     terms.set(res.terminal.address, res.terminal);
@@ -441,12 +467,8 @@ $('btn-kill').onclick = async () => {
     return;
   }
 
-  await new Promise((res) => {
-    if (ws.readyState === 1) return res();
-    ws.addEventListener('open', res, { once: true });
-  });
-
   try {
+    if (!gatewayIsReady && !(await gatewayReady)) throw new Error('gateway disconnected before ready');
     const sub = await rpc('events.subscribe', {});
     if (sub.channel != null) roles.set(sub.channel, { type: 'events' });
     for (const t of sub.terminals || []) terms.set(t.address, t);
