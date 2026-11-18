@@ -74,7 +74,7 @@ body {
 }
 .term-item:hover { background: #1b1d21; }
 .term-item.on { background: #1b1d21; border-color: #2b2e33; }
-.term-item.finished { opacity: 0.55; }
+.dim { opacity: 0.4; }
 
 .term-item .row1 {
   display: flex;
@@ -115,6 +115,20 @@ body {
 }
 .side-foot.ok { color: #3fb950; }
 .side-foot.bad { color: #f85149; }
+
+#btn-history {
+  width: 100%;
+  padding: 9px 14px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--mute);
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+#btn-history:hover { background: #1b1d21; color: var(--fg); }
 
 /* ---------------- main area ---------------- */
 
