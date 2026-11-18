@@ -1,6 +1,8 @@
 # herdgate
 
-**A tiny, hackable gateway and reference UI for [herdr-core](https://github.com/herdrdev/herdr-core)** — built for embedding, protocol learning, and trusted internal tools, not a replacement for herdr's full clients. Terminal rendering by [ghostty-web](https://github.com/coder/ghostty-web) (Ghostty's VT100 emulator compiled to WebAssembly).
+**The instant observation window for [herdr-core](https://github.com/herdrdev/herdr-core)** — paste a URL, click a terminal, watch and interact. No login, no navigation, no learning curve. Terminal rendering by [ghostty-web](https://github.com/coder/ghostty-web) (Ghostty's VT100 emulator compiled to WebAssembly).
+
+Full-featured workspaces exist ([shepherdr](https://herdr.dev) manages spaces, tasks, chats, automation). herdgate is the one-purpose tool for when you just need to **see what's running and type into it** — the screwdriver, not the Swiss Army knife.
 
 ```
 Browser (ghostty-web rendering)
