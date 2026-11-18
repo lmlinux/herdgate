@@ -83,7 +83,11 @@ historyToggle.onclick = () => {
   historyToggle.setAttribute('aria-pressed', String(showHistory));
   renderList();
 };
-$('sidebar').append(historyToggle);
+const sidebarFoot = document.createElement('div');
+sidebarFoot.className = 'side-footer';
+sidebarFoot.append($('conn-state'));
+sidebarFoot.append(historyToggle);
+$('sidebar').append(sidebarFoot);
 const clearBtn = document.createElement('button');
 clearBtn.id = 'btn-clear-finished';
 clearBtn.type = 'button';
@@ -96,7 +100,7 @@ clearBtn.onclick = async () => {
   }
   scheduleRender();
 };
-$('sidebar').append(clearBtn);
+sidebarFoot.append(clearBtn);
 
 const span = (text, cls) => {
   const s = document.createElement('span');
