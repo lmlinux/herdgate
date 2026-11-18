@@ -11,6 +11,7 @@
 import { HerdConnection, HerdView } from 'herdview';
 
 const TOKEN = window.__TOKEN__;
+const IS_RO = !!window.__RO_TOKEN__ && window.__RO_TOKEN__ === TOKEN;
 
 // ---------------------------------------------------------------- helpers
 
@@ -155,7 +156,7 @@ function renderList() {
 // ---------------------------------------------------------------- terminal view
 
 let currentView = null;
-let observePref = false;
+let observePref = IS_RO; // read-only token forces observe
 
 const termBox = $('term-container');
 
@@ -211,6 +212,13 @@ async function attachTo(addr, { observe = observePref } = {}) {
   setTitle(`${addr}${terms.get(addr)?.name ? ' · ' + terms.get(addr).name : ''}`);
   if (!observe) view.focus();
   scheduleRender();
+}
+
+if (IS_RO) {
+  $('btn-new').style.display = 'none';
+  $('btn-kill').style.display = 'none';
+  $('mode-badge').hidden = false;
+  $('mode-badge').textContent = '👁 read-only';
 }
 
 // ---------------------------------------------------------------- toolbar

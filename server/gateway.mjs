@@ -61,13 +61,21 @@ const HOST = process.env.HOST || '127.0.0.1';
 const HC_CONNECT = process.env.HC_CONNECT || 'hc connect';
 const isLoopback = (h) => h === '127.0.0.1' || h === '::1' || h === 'localhost';
 const configuredToken = process.env.HERDR_WEB_TOKEN || '';
+const configuredRoToken = process.env.HERDR_WEB_RO_TOKEN || '';
 const TOKEN = configuredToken || randomBytes(24).toString('base64url');
-const pageNeedsToken = Boolean(configuredToken) || !isLoopback(HOST);
-const tokenMatches = (candidate) => {
-  if (typeof candidate !== 'string') return false;
-  const a = Buffer.from(TOKEN);
+const RO_TOKEN = configuredRoToken || '';
+const pageNeedsToken = Boolean(configuredToken) || Boolean(configuredRoToken) || !isLoopback(HOST);
+const tokenMatches = (candidate, expected = TOKEN) => {
+  if (typeof candidate !== 'string' || !expected) return false;
+  const a = Buffer.from(expected);
   const b = Buffer.from(candidate);
   return a.length === b.length && timingSafeEqual(a, b);
+};
+/** which token matched: 'rw' (full), 'ro' (read-only), or null */
+const tokenRole = (candidate) => {
+  if (tokenMatches(candidate)) return 'rw';
+  if (RO_TOKEN && tokenMatches(candidate, RO_TOKEN)) return 'ro';
+  return null;
 };
 const validHost = (req) => {
   if (!isLoopback(HOST)) return true;
@@ -153,7 +161,8 @@ class FrameReader {
 
 function loadStatic() {
   const html = readFileSync(path.join(WEB_ROOT, 'index.html'), 'utf8')
-    .replace('__HERDR_WEB_TOKEN__', TOKEN);
+    .replace('__HERDR_WEB_TOKEN__', TOKEN)
+    .replace('__HERDR_WEB_RO_TOKEN__', RO_TOKEN);
   return new Map([
     ['/', { body: Buffer.from(html, 'utf8'), type: 'text/html; charset=utf-8' }],
     ['/app.js', { body: readFileSync(path.join(WEB_ROOT, 'app.js')), type: 'text/javascript; charset=utf-8' }],
@@ -204,9 +213,9 @@ const server = http.createServer((req, res) => {
     res.end('invalid host');
     return;
   }
-  if (u.pathname === '/' && pageNeedsToken && !tokenMatches(u.searchParams.get('token'))) {
+  if (u.pathname === '/' && pageNeedsToken && !tokenRole(u.searchParams.get('token'))) {
     res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
-    res.end('unauthorized: append ?token=HERDR_WEB_TOKEN');
+    res.end('unauthorized: append ?token=HERDR_WEB_TOKEN or ?token=HERDR_WEB_RO_TOKEN');
     return;
   }
   res.writeHead(200, {
@@ -233,7 +242,8 @@ server.on('upgrade', (req, socket, head) => {
   }
   if (u.pathname !== '/ws') return refuse(socket, 404, 'Not Found');
   if (!validHost(req)) return refuse(socket, 403, 'Invalid Host');
-  if (!tokenMatches(u.searchParams.get('token'))) return refuse(socket, 401, 'Unauthorized');
+  const role = tokenRole(u.searchParams.get('token'));
+  if (!role) return refuse(socket, 401, 'Unauthorized');
   const origin = req.headers.origin; // browsers always send it; non-browser clients may not
   if (origin) {
     try {
@@ -413,4 +423,5 @@ server.listen(PORT, HOST, () => {
   console.log(`  HC_CONNECT = ${HC_CONNECT}`);
   if (pageNeedsToken) console.log('  open /?token=HERDR_WEB_TOKEN (the configured secret is not logged)');
   else console.log(`  local per-run WebSocket token: ${TOKEN}`);
+  if (RO_TOKEN) console.log('  read-only:   /?token=HERDR_WEB_RO_TOKEN (observe-only, cannot type/create/kill)');
 });
