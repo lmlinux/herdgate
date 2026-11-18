@@ -1,27 +1,16 @@
 /**
- * herdgate frontend
+ * herdgate frontend — using herdview's HerdConnection + HerdView
  *
- * The browser speaks herdr-core's framed protocol directly (the gateway only
- * authenticates and passes bytes through):
- *   - text WS messages = JSON-RPC requests (gateway wraps them as channel 0
- *     DATA frames)
- *   - binary WS messages = hc frames (DATA/CREDIT/RESIZE/FOCUS/CLOSE of the
- *     attach stream)
- * The sidebar is driven by terminal.list + the events.subscribe stream; the
- * main pane renders the attach stream with ghostty-web (first paint plus
- * incremental bytes). Every DATA frame is credited right after being
- * consumed — herdr-core's backpressure semantics hold end to end.
+ * HerdConnection: WS lifecycle, auth, auto-reconnect, terminal list, event stream
+ * HerdView: one terminal pane (mount, attach, observe, input, resize, focus, events)
+ *
+ * This file only handles the UI shell: sidebar, toolbar, container.
+ * All protocol complexity lives in herdview.
  */
 
-import { init, Terminal, FitAddon } from '/vendor/ghostty-web.js';
-import { createJsonLineParser } from '/json-lines.js';
+import { HerdConnection, HerdView } from 'herdview';
 
 const TOKEN = window.__TOKEN__;
-const enc = new TextEncoder();
-const dec = new TextDecoder();
-
-// hc frame kinds
-const KDATA = 0, KCREDIT = 1, KCLOSE = 2, KRESIZE = 3, KFOCUS = 4;
 
 // ---------------------------------------------------------------- helpers
 
@@ -32,212 +21,31 @@ const setConn = (text, cls = '') => {
   el.className = 'side-foot ' + cls;
 };
 
-function frameBytes(channel, kind, payload) {
-  const p = payload == null ? new Uint8Array(0) : payload;
-  const out = new Uint8Array(9 + p.byteLength);
-  const dv = new DataView(out.buffer);
-  dv.setUint32(0, channel, true);
-  dv.setUint8(4, kind);
-  dv.setUint32(5, p.byteLength, true);
-  out.set(p, 9);
-  return out;
-}
-const sendFrame = (ch, kind, payload) => {
-  if (ws.readyState === 1) ws.send(frameBytes(ch, kind, payload));
-};
-const creditBytes = (n) => {
-  const b = new Uint8Array(4);
-  new DataView(b.buffer).setUint32(0, n, true);
-  return b;
-};
-const resizeBytes = (cols, rows) => {
-  const b = new Uint8Array(4);
-  const dv = new DataView(b.buffer);
-  dv.setUint16(0, cols, true);
-  dv.setUint16(1, rows, true);
-  return b;
-};
+// ---------------------------------------------------------------- connection
 
-// ---------------------------------------------------------------- WebSocket
+const connection = new HerdConnection({
+  url: `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`,
+  reconnect: true,
+  reconnectDelay: 1000,
+  maxReconnectDelay: 10000,
+});
 
-const ws = new WebSocket(
-  `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`,
-);
-ws.binaryType = 'arraybuffer';
+connection.on('status', (s) => {
+  if (s.state === 'connected') setConn('connected, subscribing…');
+  else if (s.state === 'disconnected') setConn('disconnected — reconnecting…', 'bad');
+  else if (s.state === 'reconnecting') setConn(`reconnecting… (attempt ${s.attempt || '?'})`, 'bad');
+});
 
-let nextId = 1;
-const pending = new Map(); // id -> {resolve, reject}
-const roles = new Map();   // channel -> {type:'events'} | {type:'attach', addr, observe}
-const terms = new Map();   // address -> Terminal record
-const jsonParsers = new Map(); // channel -> incremental JSON-lines parser
-let resolveGatewayReady;
-const gatewayReady = new Promise((resolve) => { resolveGatewayReady = resolve; });
-let gatewayIsReady = false;
-
-function rpc(method, params) {
-  return new Promise((resolve, reject) => {
-    const id = nextId++;
-    pending.set(id, { resolve, reject });
-    ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
-    setTimeout(() => {
-      if (pending.has(id)) {
-        pending.delete(id);
-        reject(new Error(`RPC timeout: ${method}`));
-      }
-    }, 20000);
-  });
-}
-
-ws.onopen = () => setConn('connected, subscribing…');
-ws.onerror = () => setConn('connection error', 'bad');
-ws.onclose = (e) => {
-  setConn(`disconnected${e.reason ? ': ' + e.reason : ''} — reconnecting…`, 'bad');
-  resolveGatewayReady(false);
-  for (const [, p] of pending) p.reject(new Error('connection closed'));
-  pending.clear();
-  // auto-reconnect: reload the page after 3 s (re-establishes WS + subscription)
-  setTimeout(() => location.reload(), 3000);
-};
-
-function handleJsonLine(line) {
-  if (!line.trim()) return;
-  let msg;
-  try {
-    msg = JSON.parse(line);
-  } catch {
-    return;
-  }
-  if (msg.id != null) {
-    const p = pending.get(msg.id);
-    if (p) {
-      pending.delete(msg.id);
-      if (msg.error) p.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
-      else p.resolve(msg.result);
-    }
-  } else if (msg.method) {
-    handleNotification(msg);
-  }
-}
-
-ws.onmessage = (ev) => {
-  if (typeof ev.data === 'string') {
-    // gateway control messages
-    try {
-      const c = JSON.parse(ev.data);
-      if (c.type === 'gateway' && c.event === 'ready') {
-        gatewayIsReady = true;
-        setConn('ready');
-        resolveGatewayReady(true);
-      }
-    } catch {}
-    return;
-  }
-
-  const buf = new Uint8Array(ev.data);
-  if (buf.length < 9) return;
-  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  const channel = dv.getUint32(0, true);
-  const kind = dv.getUint8(4);
-  const len = dv.getUint32(5, true);
-  if (9 + len !== buf.length) return; // incomplete/malformed frame
-  const payload = buf.subarray(9);
-
-  const role = roles.get(channel);
-  if (role && role.type === 'attach') {
-    if (kind === KDATA) {
-      if (cur && cur.channel === channel && cur.term) {
-        cur.term.write(payload); // feed ghostty-web (the WASM parser takes incremental bytes)
-        sendFrame(channel, KCREDIT, creditBytes(payload.byteLength)); // backpressure: return credit as we consume
-      }
-    } else if (kind === KCLOSE) {
-      onStreamClosed(channel, payload);
-    }
-    // RESIZE frames only arrive for observers that opted into
-    // resize_notifications; this MVP does not
-    return;
-  }
-
-  if (kind !== KDATA) return;
-  // channel 0 (RPC replies) and the events channel: JSON lines
-  let parse = jsonParsers.get(channel);
-  if (!parse) {
-    parse = createJsonLineParser(handleJsonLine);
-    jsonParsers.set(channel, parse);
-  }
-  parse(payload);
-  sendFrame(channel, KCREDIT, creditBytes(payload.byteLength)); // the event stream needs credit too
-};
-
-// ---------------------------------------------------------------- event stream
-
-function handleNotification(msg) {
-  switch (msg.method) {
-    case 'event':
-      applyEvent(msg.params);
-      break;
-    case 'missed': // this subscriber fell behind: the params are a fresh snapshot — replace wholesale
-      terms.clear();
-      for (const t of msg.params.terminals || []) terms.set(t.address, t);
-      scheduleRender();
-      break;
-    case 'heartbeat':
-      break;
-  }
-}
-
-function applyEvent(p) {
-  const t = terms.get(p.terminal);
-  const d = p.data || {};
-  switch (p.type) {
-    case 'created':
-    case 'restarted':
-      terms.set(p.terminal, d);
-      break;
-    case 'removed':
-      terms.delete(p.terminal);
-      break;
-    case 'labels':
-      if (t) {
-        t.labels = d.labels;
-        if (d.record) terms.set(p.terminal, d.record);
-      }
-      break;
-    case 'finished':
-      if (t) Object.assign(t, d, { state: 'finished' });
-      break;
-    case 'lost':
-      if (t) Object.assign(t, d);
-      break;
-    case 'keep':
-      if (t) t.keep = d.keep;
-      break;
-    case 'status':
-      if (t) {
-        t.status = d.status;
-        t.records = d.records;
-        t.reported = d.reported;
-      }
-      break;
-    case 'turn':
-      if (t) t.turn = d.turn;
-      break;
-    case 'title':
-      if (t) t.title = d.title;
-      break;
-    case 'size':
-      if (t) {
-        t.cols = d.cols;
-        t.rows = d.rows;
-      }
-      break;
-    case 'foreground':
-      if (t) t.foreground = d;
-      break;
-  }
+connection.on('terminals', ({ terminals }) => {
+  terms.clear();
+  for (const t of terminals) terms.set(t.address, t);
+  setConn(`ready · ${terms.size} terminal(s)`, 'ok');
   scheduleRender();
-}
+});
 
-// ---------------------------------------------------------------- sidebar rendering
+// ---------------------------------------------------------------- sidebar
+
+const terms = new Map();
 
 let renderQueued = false;
 const scheduleRender = () => {
@@ -277,7 +85,6 @@ function statusOf(t) {
 
 function renderList() {
   const ul = $('term-list');
-  if (gatewayIsReady && ws.readyState === 1) setConn(`ready · ${terms.size} terminal(s)`, 'ok');
   ul.innerHTML = '';
   const arr = [...terms.values()]
     .filter((t) => showHistory || t.state !== 'finished')
@@ -290,7 +97,7 @@ function renderList() {
     const li = document.createElement('li');
     li.className =
       'term-item' +
-      (cur && cur.addr === t.address ? ' on' : '') +
+      (currentView && currentView.address === t.address ? ' on' : '') +
       (t.state === 'finished' ? ' finished dim' : '');
     li.title = `${t.address}${t.name ? ' · ' + t.name : ''} · ${t.cwd || ''}`;
 
@@ -314,12 +121,11 @@ function renderList() {
   }
 }
 
-// ---------------------------------------------------------------- attach
+// ---------------------------------------------------------------- terminal view
 
-let cur = null; // {channel, addr, term, fit, observe}
+let currentView = null;
 let observePref = false;
 let nameSeq = 0;
-let attachSeq = 0;
 
 const termBox = $('term-container');
 
@@ -327,134 +133,68 @@ function setTitle(text) {
   $('term-title').textContent = text;
 }
 
-function detachCurrent() {
-  if (!cur) return;
-  const { channel, term, fit } = cur;
-  roles.delete(channel);
-  sendFrame(channel, KCLOSE, new Uint8Array(0)); // detach politely
-  try {
-    fit?.dispose();
-    term?.dispose();
-  } catch {}
-  cur = null;
+function destroyCurrentView() {
+  if (currentView) {
+    currentView.destroy();
+    currentView = null;
+  }
+  termBox.innerHTML = '';
 }
 
 async function attachTo(addr, { observe = observePref } = {}) {
-  const seq = ++attachSeq;
-  detachCurrent();
-  termBox.innerHTML = '';
+  destroyCurrentView();
   setTitle(`${addr} · attaching…`);
 
-  const term = new Terminal({
-    fontSize: 14,
-    fontFamily: '"JetBrains Mono", ui-monospace, Menlo, monospace',
-    cursorBlink: true,
-    scrollback: 10000,
-    theme: {
-      background: '#1a1b26',
-      foreground: '#a9b1d6',
-      cursor: '#c0caf5',
-      selectionBackground: '#33467c',
-    },
+  const view = new HerdView(connection, {
+    history: 500,
+    autoFocus: !observe,
   });
-  const fit = new FitAddon();
-  term.loadAddon(fit);
-  term.open(termBox);
-  try {
-    fit.fit();
-    fit.observeResize(); // container size changes → auto cols/rows → onResize → RESIZE frame
-  } catch {}
+  view.mount(termBox);
 
-  term.onData((d) => {
-    if (cur && cur.term === term && !cur.observe) {
-      sendFrame(cur.channel, KDATA, enc.encode(d));
+  view.on('status', (s) => {
+    if (currentView === view) scheduleRender();
+  });
+  view.on('title', ({ title }) => {
+    if (currentView === view && title) setTitle(`${view.address} · ${title}`);
+  });
+  view.on('closed', (reason) => {
+    if (currentView === view) {
+      const why = reason?.reason
+        ? `ended (${reason.reason}${reason.exit_code != null ? ', exit ' + reason.exit_code : ''})`
+        : 'stream closed';
+      setTitle(`${view.address} · ${why}`);
+      currentView = null;
+      scheduleRender();
     }
   });
-  term.onResize(({ cols, rows }) => {
-    if (cur && cur.term === term && !cur.observe) {
-      sendFrame(cur.channel, KRESIZE, resizeBytes(cols, rows));
-    }
-  });
-  term.onTitleChange?.((t) => {
-    if (cur && cur.term === term && t) setTitle(`${cur.addr} · ${t}`);
-  });
 
-  let res;
   try {
-    res = await rpc('terminal.attach', {
-      terminal: addr,
-      cols: term.cols || 100,
-      rows: term.rows || 30,
-      history: 500,
-      observe,
-    });
+    await view.attach(addr, { observe });
   } catch (e) {
-    fit.dispose();
-    term.dispose();
-    if (seq === attachSeq) setTitle(`${addr} · attach failed: ${e.message}`);
+    view.destroy();
+    setTitle(`${addr} · attach failed: ${e.message}`);
     return;
   }
 
-  if (seq !== attachSeq) {
-    sendFrame(res.channel, KCLOSE, new Uint8Array(0));
-    fit.dispose();
-    term.dispose();
-    return;
-  }
-  cur = { type: 'attach', channel: res.channel, addr, term, fit, observe };
-  roles.set(res.channel, cur);
-  if (res.terminal) {
-    terms.set(res.terminal.address, res.terminal);
-    scheduleRender();
-  }
+  currentView = view;
   $('mode-badge').hidden = !observe;
-  setTitle(`${addr}${res.terminal?.name ? ' · ' + res.terminal.name : ''}`);
-  if (!observe) {
-    sendFrame(res.channel, KFOCUS, new Uint8Array([1]));
-    term.focus();
-  }
+  setTitle(`${addr}${terms.get(addr)?.name ? ' · ' + terms.get(addr).name : ''}`);
+  if (!observe) view.focus();
   scheduleRender();
 }
-
-function onStreamClosed(channel, payload) {
-  let reason = '';
-  try {
-    reason = JSON.parse(dec.decode(payload));
-  } catch {}
-  const who = roles.get(channel);
-  roles.delete(channel);
-  if (cur && cur.channel === channel) {
-    const why = reason?.reason
-      ? `ended (${reason.reason}${reason.exit_code != null ? ', exit ' + reason.exit_code : ''})`
-      : 'stream closed';
-    setTitle(`${cur.addr} · ${why}`);
-    cur = null;
-    scheduleRender();
-  } else if (who) {
-    console.log('stream closed', channel, reason);
-  }
-}
-
-// window focus → FOCUS frames (only a viewer may report focus)
-window.addEventListener('focus', () => {
-  if (cur && !cur.observe) sendFrame(cur.channel, KFOCUS, new Uint8Array([1]));
-});
-window.addEventListener('blur', () => {
-  if (cur && !cur.observe) sendFrame(cur.channel, KFOCUS, new Uint8Array([0]));
-});
 
 // ---------------------------------------------------------------- toolbar
 
 $('btn-observe').onclick = () => {
   observePref = !observePref;
   $('btn-observe').classList.toggle('on', observePref);
-  if (cur) attachTo(cur.addr, { observe: observePref });
+  if (currentView) attachTo(currentView.address, { observe: observePref });
 };
 
 $('btn-new').onclick = async () => {
   const name = 'web-' + ++nameSeq;
   try {
-    const rec = await rpc('terminal.run', { name, size: { cols: 110, rows: 32 } });
+    const rec = await connection.call('terminal.run', { name, size: { cols: 110, rows: 32 } });
     if (rec?.address) {
       terms.set(rec.address, rec);
       scheduleRender();
@@ -466,39 +206,27 @@ $('btn-new').onclick = async () => {
 };
 
 $('btn-kill').onclick = async () => {
-  if (!cur) return;
+  if (!currentView) return;
   try {
-    await rpc('terminal.kill', { terminal: cur.addr });
+    await connection.call('terminal.kill', { terminal: currentView.address });
   } catch (e) {
     setTitle(`kill failed: ${e.message}`);
   }
 };
 
-// ---------------------------------------------------------------- startup
+// ---------------------------------------------------------------- init
 
 (async () => {
   try {
-    await init(); // load the ghostty WASM (same-origin static asset)
+    await connection.connect();
   } catch (e) {
-    setConn('WASM load failed', 'bad');
-    console.error(e);
+    setConn(`connection failed: ${e.message}`, 'bad');
     return;
   }
 
-  try {
-    if (!gatewayIsReady && !(await gatewayReady)) throw new Error('gateway disconnected before ready');
-    const sub = await rpc('events.subscribe', {});
-    if (sub.channel != null) roles.set(sub.channel, { type: 'events' });
-    for (const t of sub.terminals || []) terms.set(t.address, t);
-    setConn(`ready · ${terms.size} terminal(s)`, 'ok');
-    scheduleRender();
-
-    const live = [...terms.values()]
-      .sort((a, b) => (a.created_ms || 0) - (b.created_ms || 0))
-      .find((t) => t.state !== 'finished');
-    if (live) await attachTo(live.address);
-    else termBox.innerHTML = '<div class="hint">Pick a terminal on the left to attach, or click "+ New" for a shell.</div>';
-  } catch (e) {
-    setConn(`subscribe failed: ${e.message}`, 'bad');
-  }
+  const live = [...terms.values()]
+    .sort((a, b) => (a.created_ms || 0) - (b.created_ms || 0))
+    .find((t) => t.state !== 'finished');
+  if (live) await attachTo(live.address);
+  else termBox.innerHTML = '<div class="hint">Pick a terminal on the left to attach, or click "+ New" for a shell.</div>';
 })();

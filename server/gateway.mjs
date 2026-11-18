@@ -159,6 +159,10 @@ function loadStatic() {
     ['/app.js', { body: readFileSync(path.join(WEB_ROOT, 'app.js')), type: 'text/javascript; charset=utf-8' }],
     ['/app.css', { body: readFileSync(path.join(WEB_ROOT, 'app.css')), type: 'text/css; charset=utf-8' }],
     ['/json-lines.js', { body: readFileSync(path.join(WEB_ROOT, 'json-lines.js')), type: 'text/javascript; charset=utf-8' }],
+    ['/vendor/herdview.js', { body: readFileSync(path.join(__dirname, '..', '..', 'herdview', 'index.js')), type: 'text/javascript; charset=utf-8' }],
+    // herdview's ./json-lines.js relative import resolves to /vendor/json-lines.js
+    // when the module is served at /vendor/herdview.js
+    ['/vendor/json-lines.js', { body: readFileSync(path.join(__dirname, '..', '..', 'herdview', 'json-lines.js')), type: 'text/javascript; charset=utf-8' }],
     ['/vendor/ghostty-web.js', { body: readFileSync(DIST_JS), type: 'text/javascript; charset=utf-8' }],
     // the vite build of ghostty-web.js imports this stub from its own directory
     ['/vendor/__vite-browser-external-2447137e.js', {
