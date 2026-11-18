@@ -247,6 +247,20 @@ const scheduleRender = () => {
   });
 };
 
+let showHistory = false;
+const historyToggle = document.createElement('button');
+historyToggle.id = 'btn-history';
+historyToggle.type = 'button';
+historyToggle.textContent = 'show history';
+historyToggle.setAttribute('aria-pressed', 'false');
+historyToggle.onclick = () => {
+  showHistory = !showHistory;
+  historyToggle.textContent = showHistory ? 'hide history' : 'show history';
+  historyToggle.setAttribute('aria-pressed', String(showHistory));
+  renderList();
+};
+$('sidebar').append(historyToggle);
+
 const span = (text, cls) => {
   const s = document.createElement('span');
   s.className = cls || '';
@@ -263,9 +277,11 @@ function renderList() {
   const ul = $('term-list');
   if (gatewayIsReady && ws.readyState === 1) setConn(`ready · ${terms.size} terminal(s)`, 'ok');
   ul.innerHTML = '';
-  const arr = [...terms.values()].sort((a, b) => (a.created_ms || 0) - (b.created_ms || 0));
+  const arr = [...terms.values()]
+    .filter((t) => showHistory || t.state !== 'finished')
+    .sort((a, b) => (a.created_ms || 0) - (b.created_ms || 0));
   if (!arr.length) {
-    ul.innerHTML = '<li class="empty">(no terminals yet)</li>';
+    ul.innerHTML = `<li class="empty">(${terms.size ? 'no active terminals' : 'no terminals yet'})</li>`;
     return;
   }
   for (const t of arr) {
@@ -273,7 +289,7 @@ function renderList() {
     li.className =
       'term-item' +
       (cur && cur.addr === t.address ? ' on' : '') +
-      (t.state === 'finished' ? ' finished' : '');
+      (t.state === 'finished' ? ' finished dim' : '');
     li.title = `${t.address}${t.name ? ' · ' + t.name : ''} · ${t.cwd || ''}`;
 
     const row1 = document.createElement('div');
