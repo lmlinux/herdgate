@@ -194,7 +194,7 @@ $('btn-observe').onclick = () => {
 $('btn-new').onclick = async () => {
   const name = 'web-' + ++nameSeq;
   try {
-    const rec = await connection.call('terminal.run', { name, size: { cols: 110, rows: 32 } });
+    const rec = await connection.rpc('terminal.run', { name, size: { cols: 110, rows: 32 } });
     if (rec?.address) {
       terms.set(rec.address, rec);
       scheduleRender();
@@ -208,7 +208,7 @@ $('btn-new').onclick = async () => {
 $('btn-kill').onclick = async () => {
   if (!currentView) return;
   try {
-    await connection.call('terminal.kill', { terminal: currentView.address });
+    await connection.rpc('terminal.kill', { terminal: currentView.address });
   } catch (e) {
     setTitle(`kill failed: ${e.message}`);
   }
