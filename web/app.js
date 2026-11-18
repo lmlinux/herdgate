@@ -201,6 +201,7 @@ $('btn-new').onclick = async () => {
       attachTo(rec.address);
     }
   } catch (e) {
+    console.error('btn-new:', e);
     setTitle(`create failed: ${e.message}`);
   }
 };
@@ -210,6 +211,7 @@ $('btn-kill').onclick = async () => {
   try {
     await connection.rpc('terminal.kill', { terminal: currentView.address });
   } catch (e) {
+    console.error('btn-kill:', e);
     setTitle(`kill failed: ${e.message}`);
   }
 };
