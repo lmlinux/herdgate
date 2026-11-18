@@ -73,7 +73,7 @@ const scheduleRender = () => {
 
 let showHistory = false;
 const historyToggle = document.createElement('button');
-historyToggle.id = 'btn-history';
+historyToggle.className = 'side-action';
 historyToggle.type = 'button';
 historyToggle.textContent = 'show history';
 historyToggle.setAttribute('aria-pressed', 'false');
@@ -92,7 +92,7 @@ const clearBtn = document.createElement('button');
 clearBtn.id = 'btn-clear-finished';
 clearBtn.type = 'button';
 clearBtn.textContent = 'clear finished';
-clearBtn.style.cssText = historyToggle.style.cssText;
+clearBtn.className = 'side-action';
 clearBtn.onclick = async () => {
   const finished = [...terms.values()].filter((t) => t.state === 'finished');
   for (const t of finished) {
