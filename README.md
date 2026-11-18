@@ -95,6 +95,13 @@ test/                # Node test suite and fake core fixture
 - `events.subscribe` returns its own channel in framed mode; notifications arrive as JSON lines; a subscriber that falls behind gets `missed` with a fresh snapshot (replace your state wholesale)
 - Flow control: a stream starts with 256 KiB of credit; the viewer returns credit for consumed bytes; a viewer more than 4 MiB behind receives a fresh repaint instead of the backlog
 
+## Roadmap
+
+- **herdview** — an embeddable pane component: the terminal view from this
+  repo, extracted as a standalone package that orchestrator consoles and
+  internal dashboards can embed. The name is reserved for that component;
+  it will ship separately once there is a real component to ship.
+
 ## License
 
 - Code in this repo: MIT
