@@ -56,7 +56,7 @@ const startGateway = async (t, extraEnv = {}) => {
     }
   });
   await waitFor(() => output.includes('gateway listening'), `gateway did not start: ${output}`);
-  const configuredToken = extraEnv.HERDR_WEB_TOKEN;
+  const configuredToken = extraEnv.HERDR_WEB_TOKEN || extraEnv.HERDR_WEB_RO_TOKEN;
   const query = configuredToken ? `?token=${encodeURIComponent(configuredToken)}` : '';
   const response = await fetch(`http://127.0.0.1:${port}/${query}`);
   assert.equal(response.status, 200, output);
@@ -108,6 +108,24 @@ const closeSocket = (ws) => new Promise((resolve) => {
   ws.close();
 });
 
+const readCoreLog = async (logFile) => {
+  try {
+    return await readFile(logFile, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return '';
+    throw error;
+  }
+};
+
+const drainCore = async (ws, logFile, marker) => {
+  ws.send(encodeFrame(77, 1, Buffer.from(marker)));
+  await waitFor(
+    async () => (await readCoreLog(logFile)).includes(marker),
+    `core did not consume post-attack CREDIT marker ${marker}`,
+  );
+  return readCoreLog(logFile);
+};
+
 const rejectedUpgrade = (url, options = {}) => new Promise((resolve, reject) => {
   const ws = new WebSocket(url, options);
   ws.once('unexpected-response', (_request, response) => {
@@ -150,6 +168,33 @@ test('configured secret protects the token-bearing page', { timeout: 10000 }, as
   assert.equal(output().includes(secret), false);
 });
 
+test('loopback pages inject a fresh random token for each gateway run', { timeout: 10000 }, async (t) => {
+  const noConfiguredTokens = { HERDR_WEB_TOKEN: '', HERDR_WEB_RO_TOKEN: '' };
+  const first = await startGateway(t, noConfiguredTokens);
+  const second = await startGateway(t, noConfiguredTokens);
+  assert.match(first.token, /^[A-Za-z0-9_-]{32}$/);
+  assert.match(second.token, /^[A-Za-z0-9_-]{32}$/);
+  assert.notEqual(first.token, second.token);
+
+  const firstHtml = await (await fetch(`http://127.0.0.1:${first.port}/`)).text();
+  const secondHtml = await (await fetch(`http://127.0.0.1:${second.port}/`)).text();
+  assert.ok(firstHtml.includes(`window.__TOKEN__ = "${first.token}"`));
+  assert.ok(secondHtml.includes(`window.__TOKEN__ = "${second.token}"`));
+  assert.ok(!firstHtml.includes(second.token));
+  assert.ok(!secondHtml.includes(first.token));
+  assert.equal(
+    await rejectedUpgrade(`ws://127.0.0.1:${second.port}/ws?token=${first.token}`),
+    401,
+    'a token from an earlier gateway run authenticated against a new run',
+  );
+
+  for (const current of [first, second]) {
+    const ws = await openSocket(current.port, current.token);
+    await waitReady(ws);
+    await closeSocket(ws);
+  }
+});
+
 test('read-only token yields a read-only page and socket', { timeout: 10000 }, async (t) => {
   const rw = 'test-rw-secret-that-is-not-logged';
   const ro = 'test-ro-secret-that-is-not-logged';
@@ -162,6 +207,28 @@ test('read-only token yields a read-only page and socket', { timeout: 10000 }, a
   assert.match(roHtml, new RegExp(`window\\.__TOKEN__ = "${ro}"`));
   assert.doesNotMatch(roHtml, new RegExp(rw));
   const ws = await openSocket(port, ro, { origin: `http://127.0.0.1:${port}` });
+  await waitReady(ws);
+  await closeSocket(ws);
+});
+
+test('a read-only-only configuration protects the page and authenticates its socket', { timeout: 10000 }, async (t) => {
+  const ro = 'test-only-ro-secret-that-is-not-logged';
+  const { port, token } = await startGateway(t, {
+    HERDR_WEB_TOKEN: '',
+    HERDR_WEB_RO_TOKEN: ro,
+  });
+  assert.equal(token, ro);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 401);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/?token=wrong`)).status, 401);
+
+  const html = await (await fetch(`http://127.0.0.1:${port}/?token=${ro}`)).text();
+  assert.ok(html.includes(`window.__TOKEN__ = "${ro}"`));
+  assert.ok(html.includes(`window.__RO_TOKEN__ = "${ro}"`));
+  assert.doesNotMatch(html, /__HERDR_WEB_TOKEN__|__HERDR_WEB_RO_TOKEN__/);
+  assert.equal(await rejectedUpgrade(`ws://127.0.0.1:${port}/ws`), 401);
+  assert.equal(await rejectedUpgrade(`ws://127.0.0.1:${port}/ws?token=wrong`), 401);
+
+  const ws = await openSocket(port, ro);
   await waitReady(ws);
   await closeSocket(ws);
 });
@@ -222,6 +289,90 @@ test('read-only connections are enforced at the protocol level', { timeout: 1000
   assert.match(log2, /resize-ok/);
   await closeSocket(wsRw);
   await rm(logFile);
+});
+
+test('read-only RPC enforcement rejects disguised writes and binary RPC frames', { timeout: 10000 }, async (t) => {
+  const logFile = path.join(os.tmpdir(), `herdgate-ro-rpc-${process.pid}-${Date.now()}.log`);
+  t.after(() => rm(logFile, { force: true }));
+  const { port } = await startGateway(t, {
+    HERDR_WEB_TOKEN: 'test-rw-secret-that-is-not-logged',
+    HERDR_WEB_RO_TOKEN: 'test-ro-secret-that-is-not-logged',
+    FAKE_LOG_FILE: logFile,
+  });
+  const ws = await openSocket(port, 'test-ro-secret-that-is-not-logged');
+  await waitReady(ws);
+
+  const requests = [
+    { id: 301, method: 'terminal.kill', params: { attack: 'kill-rpc' } },
+    { id: 302, method: 'terminal.rm', params: { attack: 'rm-rpc' } },
+    { id: 303, method: 'events.unsubscribe', params: { attack: 'unsubscribe-rpc' } },
+    { id: 304, method: 'test.echo', params: { attack: 'unknown-rpc' } },
+  ];
+  for (const request of requests) {
+    const blocked = nextMessage(ws, (message) => message.id === request.id);
+    ws.send(JSON.stringify({ jsonrpc: '2.0', ...request }));
+    assert.match((await blocked).error.message, /read-only/);
+  }
+
+  const escaped = nextMessage(ws, (message) => message.id === 305);
+  ws.send('{"jsonrpc":"2.0","id":305,"method":"terminal.\\u0072un","params":{"attack":"escaped-rpc"}}');
+  assert.match((await escaped).error.message, /read-only/);
+  const duplicate = nextMessage(ws, (message) => message.id === 306);
+  ws.send('{"jsonrpc":"2.0","id":306,"method":"terminal.attach","method":"terminal.run","params":{"attack":"duplicate-rpc"}}');
+  assert.match((await duplicate).error.message, /read-only/);
+
+  const binaryRpc = JSON.stringify({
+    jsonrpc: '2.0', id: 307, method: 'terminal.run', params: { attack: 'binary-rpc' },
+  });
+  ws.send(encodeFrame(0, 0, Buffer.from(`${binaryRpc}\n`)));
+  const log = await drainCore(ws, logFile, 'rpc-attacks-drained');
+  for (const signature of ['kill-rpc', 'rm-rpc', 'unsubscribe-rpc', 'unknown-rpc', 'escaped-rpc', 'duplicate-rpc', 'binary-rpc']) {
+    assert.ok(!log.includes(signature), `${signature} reached the core`);
+  }
+  await closeSocket(ws);
+});
+
+test('read-only malformed messages are dropped without desynchronizing the core', { timeout: 15000 }, async (t) => {
+  const logFile = path.join(os.tmpdir(), `herdgate-ro-malformed-${process.pid}-${Date.now()}.log`);
+  t.after(() => rm(logFile, { force: true }));
+  const { port } = await startGateway(t, {
+    HERDR_WEB_TOKEN: 'test-rw-secret-that-is-not-logged',
+    HERDR_WEB_RO_TOKEN: 'test-ro-secret-that-is-not-logged',
+    FAKE_LOG_FILE: logFile,
+  });
+  const ws = await openSocket(port, 'test-ro-secret-that-is-not-logged');
+  await waitReady(ws);
+  let attackSequence = 0;
+
+  const checkDropped = async (data, signature, binary = true) => {
+    attackSequence += 1;
+    const before = await readCoreLog(logFile);
+    ws.send(data, { binary });
+    const log = await drainCore(ws, logFile, `malformed-drained-${attackSequence}`);
+    const newEntries = log.slice(before.length);
+    if (signature) assert.ok(!newEntries.includes(signature), `${signature} reached the core`);
+    assert.equal(ws.readyState, WebSocket.OPEN, `${signature || 'malformed frame'} closed the socket`);
+  };
+
+  await checkDropped('{not valid json; attack=invalid-json', 'invalid-json', false);
+  await checkDropped('{"jsonrpc":"2.0","id":401,"method":"terminal.run","attack":"truncated-json"', 'truncated-json', false);
+  await checkDropped('["not-a-request","array-json"]', 'array-json', false);
+  await checkDropped(JSON.stringify({ method: 'terminal.run', attack: 'missing-id' }), 'missing-id', false);
+  await checkDropped(JSON.stringify({ id: null, method: 'terminal.run', attack: 'null-id' }), 'null-id', false);
+  await checkDropped(JSON.stringify({ id: 402, method: 7, attack: 'numeric-method' }), 'numeric-method', false);
+  await checkDropped(Buffer.alloc(0), null);
+  await checkDropped(Buffer.alloc(8), null);
+
+  const shortPayload = Buffer.from('short-declared-length');
+  await checkDropped(encodeFrame(5, 0, shortPayload, shortPayload.length - 1), 'short-declared-length');
+  const longPayload = Buffer.from('long-declared-length');
+  await checkDropped(encodeFrame(5, 0, longPayload, longPayload.length + 1), 'long-declared-length');
+  await checkDropped(
+    encodeFrame(5, 0, Buffer.from('oversized-declared-length'), 16 * 1024 * 1024 + 1),
+    'oversized-declared-length',
+  );
+  await checkDropped(encodeFrame(5, 3, Buffer.alloc(16 * 1024 * 1024 + 1, 65), 0), null);
+  await closeSocket(ws);
 });
 
 test('non-loopback bind requires an explicit secret', async () => {
