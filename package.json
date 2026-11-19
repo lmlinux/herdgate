@@ -1,6 +1,6 @@
 {
   "name": "herdgate",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "A tiny, hackable gateway and reference UI for herdr-core — persistent terminals in the browser via ghostty-web, framed protocol client, observe mode. Not a replacement for herdr's full clients.",
   "license": "MIT",
   "type": "module",
