@@ -64,6 +64,9 @@ const configuredToken = process.env.HERDR_WEB_TOKEN || '';
 const configuredRoToken = process.env.HERDR_WEB_RO_TOKEN || '';
 const TOKEN = configuredToken || randomBytes(24).toString('base64url');
 const RO_TOKEN = configuredRoToken || '';
+if (RO_TOKEN && RO_TOKEN === TOKEN) {
+  console.error('[warn] HERDR_WEB_RO_TOKEN equals HERDR_WEB_TOKEN: read-only connections get full access');
+}
 const pageNeedsToken = Boolean(configuredToken) || Boolean(configuredRoToken) || !isLoopback(HOST);
 const tokenMatches = (candidate, expected = TOKEN) => {
   if (typeof candidate !== 'string' || !expected) return false;
@@ -433,14 +436,17 @@ wss.on('connection', (ws, role = 'rw') => {
       if (role === 'ro') {
         if (!RO_RPC_ALLOW.has(msg.method)) {
           // fail-closed allowlist: refuse with a JSON-RPC error instead of
-          // forwarding, so the caller's promise rejects rather than hangs
+          // forwarding, so the caller's promise rejects rather than hangs.
+          // The reply travels as a channel-0 DATA frame — RPC answers are
+          // frames, so real clients (herdview) reject immediately instead of
+          // waiting out their RPC timeout on a text frame they never parse.
           log(`read-only: blocked ${msg.method}`);
           if (ws.readyState === 1) {
-            ws.send(JSON.stringify({
+            ws.send(encodeFrame(0, KDATA, Buffer.from(JSON.stringify({
               jsonrpc: '2.0',
               id: msg.id,
               error: { code: -32000, message: `read-only: ${msg.method} is not permitted` },
-            }));
+            }) + '\n', 'utf8')));
           }
           return;
         }

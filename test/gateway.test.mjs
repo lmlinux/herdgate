@@ -246,10 +246,11 @@ test('read-only connections are enforced at the protocol level', { timeout: 1000
   const ws = await openSocket(port, ro, { origin: `http://127.0.0.1:${port}` });
   await waitReady(ws);
 
-  // a write RPC is refused with a JSON-RPC error, never forwarded to the core
-  const blocked = nextMessage(ws, (m) => m && m.id === 101);
+  // a write RPC is refused with a JSON-RPC error (a channel-0 frame, like
+  // every RPC answer), never forwarded to the core
+  const blocked = nextMessage(ws, (m) => m.channel === 0 && m.payload.toString().includes('"id":101'));
   ws.send(JSON.stringify({ jsonrpc: '2.0', id: 101, method: 'terminal.run', params: {} }));
-  assert.match((await blocked).error.message, /read-only/);
+  assert.match(JSON.parse((await blocked).payload.toString('utf8')).error.message, /read-only/);
 
   // terminal.attach is forwarded with observe forced on — even if the client
   // explicitly asks for a writable attachment (responses arrive as channel-0 frames)
@@ -301,6 +302,9 @@ test('read-only RPC enforcement rejects disguised writes and binary RPC frames',
   });
   const ws = await openSocket(port, 'test-ro-secret-that-is-not-logged');
   await waitReady(ws);
+  const nextReply = (id) =>
+    nextMessage(ws, (m) => m.channel === 0 && m.payload.toString().includes(`"id":${id}`))
+      .then((m) => JSON.parse(m.payload.toString('utf8')));
 
   const requests = [
     { id: 301, method: 'terminal.kill', params: { attack: 'kill-rpc' } },
@@ -309,15 +313,15 @@ test('read-only RPC enforcement rejects disguised writes and binary RPC frames',
     { id: 304, method: 'test.echo', params: { attack: 'unknown-rpc' } },
   ];
   for (const request of requests) {
-    const blocked = nextMessage(ws, (message) => message.id === request.id);
+    const blocked = nextReply(request.id);
     ws.send(JSON.stringify({ jsonrpc: '2.0', ...request }));
     assert.match((await blocked).error.message, /read-only/);
   }
 
-  const escaped = nextMessage(ws, (message) => message.id === 305);
+  const escaped = nextReply(305);
   ws.send('{"jsonrpc":"2.0","id":305,"method":"terminal.\\u0072un","params":{"attack":"escaped-rpc"}}');
   assert.match((await escaped).error.message, /read-only/);
-  const duplicate = nextMessage(ws, (message) => message.id === 306);
+  const duplicate = nextReply(306);
   ws.send('{"jsonrpc":"2.0","id":306,"method":"terminal.attach","method":"terminal.run","params":{"attack":"duplicate-rpc"}}');
   assert.match((await duplicate).error.message, /read-only/);
 

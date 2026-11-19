@@ -219,6 +219,8 @@ if (IS_RO) {
   $('btn-kill').style.display = 'none';
   // observe is locked on for read-only — the toggle must not offer a way out
   $('btn-observe').style.display = 'none';
+  // clear-finished calls terminal.rm, which the gateway blocks for read-only
+  $('btn-clear-finished').style.display = 'none';
   $('mode-badge').hidden = false;
   $('mode-badge').textContent = '👁 read-only';
 }
