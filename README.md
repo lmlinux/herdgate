@@ -2,7 +2,7 @@
 
 **The instant observation window for [herdr-core](https://github.com/herdrdev/herdr-core)** — paste a URL, click a terminal, watch and interact. No login, no navigation, no learning curve. Terminal rendering by [ghostty-web](https://github.com/coder/ghostty-web) (Ghostty's VT100 emulator compiled to WebAssembly). Protocol handling by [herdview](https://www.npmjs.com/package/herdview) (HerdConnection + HerdView).
 
-Full-featured workspaces exist ([shepherdr](https://herdr.dev) manages spaces, tasks, chats, automation). herdgate is the one-purpose tool for when you just need to **see what's running and type into it** — the screwdriver, not the Swiss Army knife.
+Full-featured workspaces exist — [shepherdr](https://herdr.dev) (spaces, tasks, chats, automation), herdr's official Windows app, or anything else built on `hc`. They don't compete with herdgate: every herdr client drives the **same** herdr-core terminals, so one herdgate window observes and interacts across all of them. Create work in whichever client you like; watch it — and type into it — through herdgate. The screwdriver that lives next to everyone's Swiss Army knife.
 
 ```
 Browser (ghostty-web rendering via herdview)
@@ -12,6 +12,7 @@ gateway (this repo, single Node process: auth + pass-through)
    │  hc connect child process (stdin/stdout, framed protocol)
    ▼
 herdr-core ── persistent terminals running Claude Code / Codex / dev servers / anything
+             (created by any client: Windows app, shepherdr, hc CLI — all visible here)
               └─ ssh box hc connect reaches a remote machine's core
 ```
 
