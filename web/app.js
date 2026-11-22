@@ -179,6 +179,10 @@ async function attachTo(addr, { observe = observePref } = {}) {
   const view = new HerdView(connection, {
     history: 500,
     autoFocus: !observe,
+    terminalOptions: {
+      fontFamily: '"Sarasa Mono SC", "Noto Sans Mono CJK SC", "NSimSun", ui-monospace, monospace',
+      fontSize: 13,
+    },
   });
   view.mount(termBox);
 

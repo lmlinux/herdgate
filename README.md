@@ -69,6 +69,10 @@ Generate tokens with `openssl rand -hex 12`. No CLI, no config file, no registra
 - Framed protocol (channels, CREDIT, RESIZE, FOCUS) handled entirely by [herdview](https://www.npmjs.com/package/herdview)
 - Cross-origin WebSocket handshakes rejected
 
+**CJK terminal rendering**
+- Cell widths follow the system CJK glyph advance so mixed Chinese, Japanese, Korean, and ASCII output stays on the terminal grid.
+- For the best dual-width rendering, install Sarasa Mono SC or Noto Sans Mono CJK SC. herdgate uses system fonts only and downloads no font assets; NSimSun is preferred on Windows when the other fonts are unavailable.
+
 **Auth**
 - Loopback: per-run random token (auto-generated, printed to console)
 - Non-loopback: requires explicit `HERDR_WEB_TOKEN`; optional `HERDR_WEB_RO_TOKEN` for read-only
