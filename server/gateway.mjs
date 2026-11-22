@@ -178,6 +178,12 @@ function loadStatic() {
     ['/', { body: Buffer.from(html, 'utf8'), type: 'text/html; charset=utf-8', template: true }],
     ['/app.js', { body: readFileSync(path.join(WEB_ROOT, 'app.js')), type: 'text/javascript; charset=utf-8' }],
     ['/app.css', { body: readFileSync(path.join(WEB_ROOT, 'app.css')), type: 'text/css; charset=utf-8' }],
+    // bundled dual-width terminal font (webfonts, ~6MB per weight)
+    ...(['MapleMono-NF-CN-Regular.woff2', 'MapleMono-NF-CN-Bold.woff2'].map((f) => [
+      `/fonts/${f}`,
+      { body: readFileSync(path.join(WEB_ROOT, 'fonts', f)), type: 'font/woff2', cache: 'public, max-age=604800' },
+    ])),
+    ['/fonts/MapleMono-LICENSE.txt', { body: readFileSync(path.join(WEB_ROOT, 'fonts', 'MapleMono-LICENSE.txt')), type: 'text/plain; charset=utf-8' }],
     // web/json-lines.js was removed (app.js imports from herdview now);
     // herdview's json-lines is served at /vendor/json-lines.js below
     // herdview: serve from a sibling directory (dev) or node_modules (npm);
@@ -246,7 +252,7 @@ const server = http.createServer((req, res) => {
   }
   res.writeHead(200, {
     'content-type': hit.type,
-    'cache-control': 'no-store',
+    'cache-control': hit.cache || 'no-store',
     'content-length': body.length,
   });
   res.end(body);

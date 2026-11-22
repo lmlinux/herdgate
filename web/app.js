@@ -180,7 +180,7 @@ async function attachTo(addr, { observe = observePref } = {}) {
     history: 500,
     autoFocus: !observe,
     terminalOptions: {
-      fontFamily: '"Sarasa Mono SC", "Noto Sans Mono CJK SC", "NSimSun", ui-monospace, monospace',
+      fontFamily: '"Maple Mono NF CN", "Sarasa Mono SC", "Noto Sans Mono CJK SC", "NSimSun", ui-monospace, monospace',
       fontSize: 13,
     },
   });

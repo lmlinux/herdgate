@@ -1,3 +1,23 @@
+/* ---------------- bundled terminal font ----------------
+   Maple Mono NF CN (JetBrains Mono base + CJK + Nerd icons, strict 2:1
+   dual-width). Served from /fonts/ so every client renders identically
+   instead of depending on locally installed fonts. ~6MB per weight, cached
+   by the browser after first load. License: web/fonts/MapleMono-LICENSE.txt */
+@font-face {
+  font-family: "Maple Mono NF CN";
+  src: url("/fonts/MapleMono-NF-CN-Regular.woff2") format("woff2");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Maple Mono NF CN";
+  src: url("/fonts/MapleMono-NF-CN-Bold.woff2") format("woff2");
+  font-weight: bold;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --bg: #0e0f11;
   --panel: #131416;
@@ -6,7 +26,7 @@
   --mute: #8a8e96;
   --dim: #5d6168;
   --amber: #e8912a;
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mono: "Maple Mono NF CN", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
