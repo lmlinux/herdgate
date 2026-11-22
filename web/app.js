@@ -115,23 +115,59 @@ function statusOf(t) {
   return t.status?.state || 'idle';
 }
 
+// Keyed incremental list rendering: one persistent <li> node per terminal
+// address. The old full-rebuild (innerHTML = '' on every terminals push)
+// replaced every node mid-click while agents were active (mousedown on node
+// vN, mouseup on its replacement -> no click event), which made switching
+// need many attempts. Rebuilding only a row's CONTENT keeps the clickable
+// node identity stable; even if a row's children change between mousedown
+// and mouseup, the click dispatches on the common ancestor <li>.
+const liByAddr = new Map();
+
+function rowSig(t, on) {
+  return [
+    t.name,
+    t.title,
+    (t.argv && t.argv[0]) || '',
+    t.state,
+    t.status?.msg,
+    t.foreground?.name,
+    t.cwd,
+    on ? 1 : 0,
+    t.state === 'finished' ? 1 : 0,
+  ].join('\u0001');
+}
+
 function renderList() {
   const ul = $('term-list');
-  ul.innerHTML = '';
   const arr = [...terms.values()]
     .filter((t) => showHistory || t.state !== 'finished')
     .sort((a, b) => (a.created_ms || 0) - (b.created_ms || 0));
+  ul.textContent = '';
   if (!arr.length) {
     ul.innerHTML = `<li class="empty">(${terms.size ? 'no active terminals' : 'no terminals yet'})</li>`;
+    liByAddr.clear();
     return;
   }
+  const seen = new Set();
   for (const t of arr) {
-    const li = document.createElement('li');
+    seen.add(t.address);
+    const on = currentView && currentView.address === t.address;
+    const sig = rowSig(t, on);
+    let li = liByAddr.get(t.address);
+    if (li && li._sig === sig) {
+      ul.appendChild(li); // existing node unchanged: reposition only
+      continue;
+    }
+    if (!li) {
+      li = document.createElement('li');
+      li.className = 'term-item';
+      li.onclick = () => attachTo(t.address);
+    }
     li.className =
-      'term-item' +
-      (currentView && currentView.address === t.address ? ' on' : '') +
-      (t.state === 'finished' ? ' finished dim' : '');
+      'term-item' + (on ? ' on' : '') + (t.state === 'finished' ? ' finished dim' : '');
     li.title = `${t.address}${t.name ? ' · ' + t.name : ''} · ${t.cwd || ''}`;
+    li.textContent = '';
 
     const row1 = document.createElement('div');
     row1.className = 'row1';
@@ -148,8 +184,12 @@ function renderList() {
     row2.textContent = bits.join(' · ');
 
     li.append(row1, row2);
-    li.onclick = () => attachTo(t.address);
-    ul.append(li);
+    li._sig = sig;
+    liByAddr.set(t.address, li);
+    ul.appendChild(li);
+  }
+  for (const addr of [...liByAddr.keys()]) {
+    if (!seen.has(addr)) liByAddr.delete(addr);
   }
 }
 
@@ -172,7 +212,17 @@ function destroyCurrentView() {
   termBox.innerHTML = '';
 }
 
+let attachGen = 0;
+
 async function attachTo(addr, { observe = observePref } = {}) {
+  // Clicking the terminal that is already attached must not tear it down and
+  // reattach (slow, and racing the reattach against further clicks).
+  if (currentView && currentView.address === addr) return;
+  // Generation guard: rapid clicks start several async attaches on the shared
+  // connection; only the latest one may win. A late-finishing stale attach
+  // used to overwrite currentView, leaving the title/highlight out of sync
+  // with the visible pane.
+  const gen = ++attachGen;
   destroyCurrentView();
   setTitle(`${addr} · attaching…`);
 
@@ -207,7 +257,13 @@ async function attachTo(addr, { observe = observePref } = {}) {
     await view.attach(addr, { observe });
   } catch (e) {
     view.destroy();
-    setTitle(`${addr} · attach failed: ${e.message}`);
+    if (gen === attachGen) setTitle(`${addr} · attach failed: ${e.message}`);
+    return;
+  }
+  if (gen !== attachGen) {
+    // A newer click superseded this attach: discard the stale view before it
+    // can overwrite currentView or leak its mount.
+    view.destroy();
     return;
   }
 
