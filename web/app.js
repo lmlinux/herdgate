@@ -51,6 +51,7 @@ connection.on('status', (s) => {
   else if (s.state === 'reconnecting') setConn(`reconnecting… (attempt ${s.attempt || '?'})`, 'bad');
 });
 
+console.log('[herdgate] app.js 8e8cd52 — keyed list + attach race fix loaded');
 connection.on('terminals', ({ terminals }) => {
   terms.clear();
   for (const t of terminals) terms.set(t.address, t);
