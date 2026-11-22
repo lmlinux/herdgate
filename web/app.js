@@ -205,20 +205,58 @@ function setTitle(text) {
   $('term-title').textContent = text;
 }
 
-function destroyCurrentView() {
-  if (currentView) {
-    currentView.destroy();
-    currentView = null;
-  }
-  termBox.innerHTML = '';
-}
-
+// View cache: keep one live, still-attached HerdView per terminal in its own
+// wrapper. Switching back to a viewed terminal is a display toggle (0ms)
+// instead of a full attach + scrollback replay + canvas render (~1s+).
+// HerdView.attach() wipes its mount container, so each view gets a private
+// wrapper inside #term-container.
+const viewsByAddr = new Map(); // addr -> { view, wrapper, title }
+const VIEW_CACHE_MAX = 6;
 let attachGen = 0;
 
+function evictView(entry) {
+  if (!entry) return;
+  viewsByAddr.delete(viewsByAddrGetKey(entry));
+  try { entry.view.destroy(); } catch {}
+  entry.wrapper.remove();
+}
+function viewsByAddrGetKey(entry) {
+  for (const [k, v] of viewsByAddr) if (v === entry) return k;
+  return null;
+}
+
+function showEntry(entry) {
+  for (const [, e] of viewsByAddr) e.wrapper.style.display = 'none';
+  entry.wrapper.style.display = '';
+}
+
+function destroyCurrentView() {
+  // Superseded mid-attach (generation guard): tear the half-attached view down
+  // completely — it was never cached. A cached, fully-attached view is only
+  // hidden, never destroyed, so switching back is instant.
+  if (pendingEntry) {
+    try { pendingEntry.view.destroy(); } catch {}
+    pendingEntry.wrapper.remove();
+    pendingEntry = null;
+  }
+  currentView = null;
+}
+
+let pendingEntry = null;
+
 async function attachTo(addr, { observe = observePref } = {}) {
-  // Clicking the terminal that is already attached must not tear it down and
-  // reattach (slow, and racing the reattach against further clicks).
+  // Clicking the visible terminal is a no-op.
   if (currentView && currentView.address === addr) return;
+  // Cached and still alive: instant switch.
+  const cached = viewsByAddr.get(addr);
+  if (cached && !cached.view.destroyed) {
+    showEntry(cached);
+    currentView = cached.view;
+    setTitle(cached.title ? `${addr} · ${cached.title}` : addr);
+    scheduleRender();
+    return;
+  }
+  if (cached) evictView(cached);
   // Generation guard: rapid clicks start several async attaches on the shared
   // connection; only the latest one may win. A late-finishing stale attach
   // used to overwrite currentView, leaving the title/highlight out of sync
@@ -226,6 +264,12 @@ async function attachTo(addr, { observe = observePref } = {}) {
   const gen = ++attachGen;
   destroyCurrentView();
   setTitle(`${addr} · attaching…`);
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'view-slot';
+  termBox.appendChild(wrapper);
+  const entry = { wrapper, title: '' };
+  pendingEntry = entry;
 
   const view = new HerdView(connection, {
     history: 500,
@@ -235,39 +279,49 @@ async function attachTo(addr, { observe = observePref } = {}) {
       fontSize: 13,
     },
   });
-  view.mount(termBox);
+  entry.view = view;
+  view.mount(wrapper);
 
-  view.on('status', (s) => {
+  view.on('status', (st) => {
     if (currentView === view) scheduleRender();
+    if (st.state === 'closed') {
+      const e = viewsByAddr.get(addr);
+      if (e === entry) evictView(entry);
+    }
   });
   view.on('title', ({ title }) => {
+    entry.title = title || entry.title;
     if (currentView === view && title) setTitle(`${view.address} · ${title}`);
-  });
-  view.on('closed', (reason) => {
-    if (currentView === view) {
-      const why = reason?.reason
-        ? `ended (${reason.reason}${reason.exit_code != null ? ', exit ' + reason.exit_code : ''})`
-        : 'stream closed';
-      setTitle(`${view.address} · ${why}`);
-      currentView = null;
-      scheduleRender();
-    }
   });
 
   try {
     await view.attach(addr, { observe });
   } catch (e) {
     view.destroy();
+    wrapper.remove();
     if (gen === attachGen) setTitle(`${addr} · attach failed: ${e.message}`);
+    if (pendingEntry === entry) pendingEntry = null;
     return;
   }
   if (gen !== attachGen) {
     // A newer click superseded this attach: discard the stale view before it
     // can overwrite currentView or leak its mount.
     view.destroy();
+    wrapper.remove();
+    if (pendingEntry === entry) pendingEntry = null;
     return;
   }
+  if (pendingEntry === entry) pendingEntry = null;
 
+  viewsByAddr.set(addr, entry);
+  // LRU cap: evict the oldest cached entry beyond the max.
+  while (viewsByAddr.size > VIEW_CACHE_MAX) {
+    const oldest = viewsByAddr.entries().next().value;
+    if (oldest && oldest[1] !== entry) evictView(oldest[1]);
+    else break;
+  }
+
+  showEntry(entry);
   currentView = view;
   $('mode-badge').hidden = !observe;
   setTitle(`${addr}${terms.get(addr)?.name ? ' · ' + terms.get(addr).name : ''}`);
@@ -291,7 +345,15 @@ if (IS_RO) {
 $('btn-observe').onclick = () => {
   observePref = !observePref;
   $('btn-observe').classList.toggle('on', observePref);
-  if (currentView) attachTo(currentView.address, { observe: observePref });
+  if (currentView) {
+    // Mode change must re-attach, not hit the view cache: evict the current
+    // entry first so attachTo does a fresh attach in the new mode.
+    const addr = currentView.address;
+    const e = viewsByAddr.get(addr);
+    if (e) { viewsByAddr.delete(addr); try { e.view.destroy(); } catch {} e.wrapper.remove(); }
+    if (currentView === e?.view) currentView = null;
+    attachTo(addr, { observe: observePref });
+  }
 };
 
 $('btn-new').onclick = async () => {

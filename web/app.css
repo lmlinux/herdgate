@@ -204,6 +204,12 @@ body {
   min-height: 0;
   padding: 6px;
   background: var(--bg);
+  position: relative;
+}
+/* One view-slot per cached terminal view; only the visible one is displayed. */
+.view-slot {
+  position: absolute;
+  inset: 6px;
 }
 #term-container .hint {
   color: var(--dim);
