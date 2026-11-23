@@ -32,7 +32,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { defaultSocketDir, discoverCores, parseCoreList } from './cores.mjs';
+import { createCoreRefresher, defaultSocketDir, parseCoreList } from './cores.mjs';
 
 if (process.argv.slice(2).some((arg) => arg === '--help' || arg === '-h')) {
   process.stdout.write(`Usage: herdgate [--help]
@@ -73,10 +73,11 @@ const configuredCores = parseCoreList(process.env.HC_CORES || '');
 // mode (including ssh). HC_CORES opts that command into per-session routing.
 const singleCore = Boolean(process.env.HC_CONNECT) && configuredCores.length === 0;
 let availableCores = singleCore ? ['default'] : [...configuredCores];
+const refreshDiscoveredCores = createCoreRefresher(HC_SOCKET_DIR);
 
 async function refreshCores() {
   if (!singleCore && configuredCores.length === 0) {
-    availableCores = await discoverCores(HC_SOCKET_DIR);
+    availableCores = await refreshDiscoveredCores();
   }
   return availableCores;
 }

@@ -45,7 +45,7 @@ Environment variables:
 
 With no explicit `HC_CONNECT` or `HC_CORES`, herdgate scans the invoking user's `$XDG_RUNTIME_DIR/herdr-core` (falling back to `/run/user/<uid>/herdr-core`). Every public `<name>.sock` API socket becomes a core named `<name>`; internal `<name>.holder.<hash>.sock` files and non-socket entries are ignored. Core names are discovered generically, not hardcoded.
 
-The browser refreshes discovery every 5 seconds. A core that appears later joins the same page without a gateway restart; a disappeared core and its cached views are removed. A stale socket may briefly appear as an unavailable core until its connection fails. Socket scanning is automatic and local-only; use `HC_CORES` for a deterministic configured list.
+The browser refreshes discovery every 5 seconds. A core that appears later joins the same page without a gateway restart; a disappeared core and its cached views are removed. A stale socket remains listed and its connection keeps retrying until the socket file disappears. Socket scanning is automatic and local-only; use `HC_CORES` for a deterministic configured list.
 
 Each core gets an independent `hc connect --session <name>` child and browser `HerdConnection`. Terminal addresses, channel numbers, RPC IDs, flow-control credits, and attachments therefore stay scoped to their own core, with no protocol rewriting. Attach, observe, input, resize, kill, and clear-finished all use the selected terminal's core. `+ New` uses the active core, falling back to `default` or the first available core.
 

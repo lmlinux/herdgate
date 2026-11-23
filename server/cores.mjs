@@ -28,3 +28,16 @@ export async function discoverCores(directory) {
     .map((entry) => entry.name.slice(0, -'.sock'.length))
     .sort((a, b) => a.localeCompare(b));
 }
+
+/** Share each in-flight scan so timer/API callers cannot apply stale results. */
+export function createCoreRefresher(directory, discover = discoverCores) {
+  let pending = null;
+  return () => {
+    if (!pending) {
+      pending = discover(directory).finally(() => {
+        pending = null;
+      });
+    }
+    return pending;
+  };
+}

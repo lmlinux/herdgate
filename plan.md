@@ -14,9 +14,9 @@
 - Re-scan every 5 seconds and expose the result at authenticated `GET
   /api/cores`. The browser polls it, so newly appearing cores join without a
   gateway restart. Socket scanning is cheap and needs no core cooperation, but
-  stale sockets can produce a labeled offline core until its connection fails;
-  configured lists trade automatic discovery for deterministic remote/custom
-  setups.
+  stale sockets remain listed and reconnect indefinitely until their socket
+  files disappear; configured lists trade automatic discovery for deterministic
+  remote/custom setups.
 
 ## Connections and protocol
 
