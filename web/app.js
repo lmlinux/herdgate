@@ -347,6 +347,11 @@ async function attachTo(key, { observe = observePref } = {}) {
 
   const cached = viewsByKey.get(key);
   if (cached && !cached.view.destroyed) {
+    // A slow attach on another core may still be pending. Cancel it before
+    // showing this cached view, or its late completion could steal currentView
+    // while currentCore stays here and misroute kill/observe actions.
+    ++attachGen;
+    destroyCurrentView();
     showEntry(cached);
     currentView = cached.view;
     setModeBadge(cached.view.observe);
