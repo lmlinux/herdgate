@@ -3,6 +3,8 @@ import { appendFileSync } from 'node:fs';
 const handshakeDelay = Number.parseInt(process.env.FAKE_HANDSHAKE_DELAY || '0', 10);
 const earlyFile = process.env.FAKE_EARLY_FILE;
 const logFile = process.env.FAKE_LOG_FILE;
+const sessionFlag = process.argv.indexOf('--session');
+const coreName = sessionFlag >= 0 ? process.argv[sessionFlag + 1] : 'default';
 let phase = 'hello';
 let pending = Buffer.alloc(0);
 
@@ -36,13 +38,27 @@ const sendFragmentedFrame = () => {
 const handleRequest = (request) => {
   if (request.method === 'events.subscribe') {
     sendJson({ jsonrpc: '2.0', id: request.id, result: { channel: 7, terminals: [] } });
+  } else if (request.method === 'terminal.list') {
+    sendJson({
+      jsonrpc: '2.0',
+      id: request.id,
+      result: {
+        terminals: [{
+          address: 't1',
+          name: `${coreName}-terminal`,
+          state: 'live',
+          cwd: `/fake/${coreName}`,
+          core: coreName,
+        }],
+      },
+    });
   } else if (request.method === 'terminal.attach') {
     // echo the observe flag so tests can assert the gateway forced it on
-    sendJson({ jsonrpc: '2.0', id: request.id, result: { channel: 5, observe: request.params?.observe } });
+    sendJson({ jsonrpc: '2.0', id: request.id, result: { channel: 5, observe: request.params?.observe, core: coreName } });
   } else if (request.method === 'terminal.run') {
-    sendJson({ jsonrpc: '2.0', id: request.id, result: { address: 't-fake' } });
+    sendJson({ jsonrpc: '2.0', id: request.id, result: { address: `${coreName}-t-fake`, core: coreName } });
   } else if (request.method === 'test.echo') {
-    sendJson({ jsonrpc: '2.0', id: request.id, result: { echo: request.params } });
+    sendJson({ jsonrpc: '2.0', id: request.id, result: { echo: request.params, core: coreName } });
   } else if (request.method === 'test.frame') {
     sendJson({ jsonrpc: '2.0', id: request.id, result: { ok: true } });
     sendFragmentedFrame();
@@ -57,7 +73,7 @@ const consumeFrames = () => {
     const kind = pending.readUInt8(4);
     const payload = pending.subarray(9, 9 + length);
     pending = pending.subarray(9 + length);
-    if (logFile) appendFileSync(logFile, `${channel} ${kind} ${payload.toString('utf8').trim()}\n`);
+    if (logFile) appendFileSync(logFile, `${channel} ${kind} ${payload.toString('utf8').trim()} core=${coreName}\n`);
     if (channel !== 0 || kind !== 0) continue;
     for (const line of payload.toString('utf8').split('\n')) {
       if (line.trim()) handleRequest(JSON.parse(line));

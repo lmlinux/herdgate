@@ -29,6 +29,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { defaultSocketDir, discoverCores, parseCoreList } from './cores.mjs';
 
 if (process.argv.slice(2).some((arg) => arg === '--help' || arg === '-h')) {
   process.stdout.write(`Usage: herdgate [--help]
@@ -40,7 +41,11 @@ Environment variables:
   PORT             HTTP/WebSocket port (default: 8787)
   HOST             Bind address (default: 127.0.0.1)
   HC_CONNECT       Command used to connect to herdr-core (default: hc connect)
+                   Explicitly setting this retains single-core mode unless HC_CORES is set
+  HC_CORES         Comma-separated core names; appends --session NAME per connection
+  HC_SOCKET_DIR    Core socket directory (default: $XDG_RUNTIME_DIR/herdr-core)
   HERDR_WEB_TOKEN  Browser/WebSocket token (required for a non-loopback HOST)
+  HERDR_WEB_RO_TOKEN  Optional read-only browser/WebSocket token
 `);
   process.exit(0);
 }
@@ -59,6 +64,39 @@ const intEnv = (name, dflt) => {
 const PORT = intEnv('PORT', 8787);
 const HOST = process.env.HOST || '127.0.0.1';
 const HC_CONNECT = process.env.HC_CONNECT || 'hc connect';
+const HC_SOCKET_DIR = process.env.HC_SOCKET_DIR || defaultSocketDir();
+const configuredCores = parseCoreList(process.env.HC_CORES || '');
+// An explicit HC_CONNECT remains the backwards-compatible single-upstream
+// mode (including ssh). HC_CORES opts that command into per-session routing.
+const singleCore = Boolean(process.env.HC_CONNECT) && configuredCores.length === 0;
+let availableCores = singleCore ? ['default'] : [...configuredCores];
+
+async function refreshCores() {
+  if (!singleCore && configuredCores.length === 0) {
+    availableCores = await discoverCores(HC_SOCKET_DIR);
+  }
+  return availableCores;
+}
+
+await refreshCores();
+const discoveryTimer = setInterval(() => {
+  refreshCores().catch((error) => console.error(`[discovery] ${error.message}`));
+}, 5000);
+discoveryTimer.unref();
+
+function selectCore(requested) {
+  if (singleCore) {
+    return !requested || requested === 'default' ? { label: 'default', session: '' } : null;
+  }
+  if (requested) {
+    return availableCores.includes(requested) ? { label: requested, session: requested } : null;
+  }
+  // A client that predates ?core= retains hc connect's own default behavior.
+  // The current browser always supplies an explicit discovered core name.
+  const label = availableCores.includes('default') ? 'default' : availableCores[0] || 'default';
+  return { label, session: availableCores.length ? label : '' };
+}
+
 const isLoopback = (h) => h === '127.0.0.1' || h === '::1' || h === 'localhost';
 const configuredToken = process.env.HERDR_WEB_TOKEN || '';
 const configuredRoToken = process.env.HERDR_WEB_RO_TOKEN || '';
@@ -217,8 +255,39 @@ const STATIC = loadStatic();
 
 // ------------------------------------------------------------- HTTP + WS
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://localhost');
+  if (u.pathname === '/api/cores') {
+    if (req.method !== 'GET') {
+      res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', allow: 'GET' });
+      res.end('method not allowed');
+      return;
+    }
+    if (!validHost(req)) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+      res.end('invalid host');
+      return;
+    }
+    if (!tokenRole(u.searchParams.get('token'))) {
+      res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+      res.end('unauthorized');
+      return;
+    }
+    try {
+      const cores = await refreshCores();
+      const body = JSON.stringify({ cores });
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'content-length': Buffer.byteLength(body),
+      });
+      res.end(body);
+    } catch (error) {
+      res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(`discovery failed: ${error.message}`);
+    }
+    return;
+  }
   const hit = STATIC.get(u.pathname);
   if (!hit || req.method !== 'GET') {
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
@@ -276,6 +345,8 @@ server.on('upgrade', (req, socket, head) => {
   if (!validHost(req)) return refuse(socket, 403, 'Invalid Host');
   const role = tokenRole(u.searchParams.get('token'));
   if (!role) return refuse(socket, 401, 'Unauthorized');
+  const selectedCore = selectCore(u.searchParams.get('core') || '');
+  if (!selectedCore) return refuse(socket, 404, 'Unknown Core');
   const origin = req.headers.origin; // browsers always send it; non-browser clients may not
   if (origin) {
     try {
@@ -286,7 +357,7 @@ server.on('upgrade', (req, socket, head) => {
       return refuse(socket, 403, 'Bad Origin');
     }
   }
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, role));
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, role, selectedCore));
 });
 
 /** Handshake with hc connect: send a plain hello{framed:true} line,
@@ -335,9 +406,10 @@ function handshake(child, cb) {
 
 let connSeq = 0;
 
-wss.on('connection', (ws, role = 'rw') => {
+wss.on('connection', (ws, role = 'rw', selectedCore = { label: 'default', session: '' }) => {
   const id = ++connSeq;
   const argv = HC_CONNECT.split(/\s+/).filter(Boolean);
+  if (selectedCore.session) argv.push('--session', selectedCore.session);
   let child;
   try {
     child = spawn(argv[0], argv.slice(1), { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -348,7 +420,7 @@ wss.on('connection', (ws, role = 'rw') => {
   let alive = true;
   let coreReady = false;
   const log = (...a) => console.log(`[conn ${id}]`, ...a);
-  log(`core: ${HC_CONNECT} (pid ${child.pid})`);
+  log(`core ${selectedCore.label}: ${HC_CONNECT} (pid ${child.pid})`);
 
   ws.on('close', () => {
     alive = false;
@@ -478,6 +550,9 @@ server.once('error', (error) => {
 server.listen(PORT, HOST, () => {
   console.log(`herdgate gateway listening: http://${HOST}:${PORT}/`);
   console.log(`  HC_CONNECT = ${HC_CONNECT}`);
+  if (singleCore) console.log('  core mode = single (explicit HC_CONNECT)');
+  else if (configuredCores.length) console.log(`  cores = ${configuredCores.join(', ')}`);
+  else console.log(`  discovering core API sockets in ${HC_SOCKET_DIR} (every 5s)`);
   if (pageNeedsToken) console.log('  open /?token=HERDR_WEB_TOKEN (the configured secret is not logged)');
   else console.log(`  local per-run WebSocket token: ${TOKEN}`);
   if (RO_TOKEN) console.log('  read-only:   /?token=HERDR_WEB_RO_TOKEN (observe-only, cannot type/create/kill)');

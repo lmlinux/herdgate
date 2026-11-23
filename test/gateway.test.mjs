@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readFile, rm } from 'node:fs/promises';
+import { readFile, rm, mkdtemp, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
@@ -72,6 +72,12 @@ const openSocket = (port, token, options = {}) => new Promise((resolve, reject) 
   ws.once('error', reject);
 });
 
+const openCoreSocket = (port, token, core, options = {}) => new Promise((resolve, reject) => {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(token)}&core=${encodeURIComponent(core)}`, options);
+  ws.once('open', () => resolve(ws));
+  ws.once('error', reject);
+});
+
 const nextMessage = (ws, predicate, timeout = 3000) => new Promise((resolve, reject) => {
   const timer = setTimeout(() => {
     ws.off('message', onMessage);
@@ -103,6 +109,12 @@ const encodeFrame = (channel, kind, payload = Buffer.alloc(0)) => {
 };
 
 const waitReady = (ws) => nextMessage(ws, (message) => message.event === 'ready');
+const rpc = async (ws, id, method, params = {}) => {
+  const reply = nextMessage(ws, (message) => message.channel === 0 && message.payload.toString().includes(`"id":${id}`));
+  ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+  const frame = await reply;
+  return JSON.parse(frame.payload.toString('utf8'));
+};
 const closeSocket = (ws) => new Promise((resolve) => {
   ws.once('close', resolve);
   ws.close();
@@ -486,4 +498,121 @@ test('missing hc executable closes the browser connection', { timeout: 10000 }, 
   const closed = await new Promise((resolve) => ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() })));
   assert.equal(closed.code, 1011);
   assert.match(closed.reason, /core connection failed/);
+});
+
+test('configured cores route lists, attachments and frames independently', { timeout: 10000 }, async (t) => {
+  const logFile = path.join(os.tmpdir(), `herdgate-multicore-${process.pid}-${Date.now()}.log`);
+  t.after(() => rm(logFile, { force: true }));
+  const { port, token } = await startGateway(t, {
+    HC_CORES: 'alpha,beta',
+    FAKE_LOG_FILE: logFile,
+  });
+
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/cores`)).status, 401);
+  const response = await fetch(`http://127.0.0.1:${port}/api/cores?token=${encodeURIComponent(token)}`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { cores: ['alpha', 'beta'] });
+  assert.equal(
+    await rejectedUpgrade(`ws://127.0.0.1:${port}/ws?token=${token}&core=not-configured`),
+    404,
+  );
+
+  const alpha = await openCoreSocket(port, token, 'alpha');
+  const beta = await openCoreSocket(port, token, 'beta');
+  await Promise.all([waitReady(alpha), waitReady(beta)]);
+
+  for (const [ws, core, id] of [[alpha, 'alpha', 11], [beta, 'beta', 21]]) {
+    const listed = await rpc(ws, id, 'terminal.list', { all: true });
+    assert.equal(listed.result.terminals[0].address, 't1', 'both fixtures deliberately reuse t1');
+    assert.equal(listed.result.terminals[0].core, core);
+    const attached = await rpc(ws, id + 1, 'terminal.attach', { terminal: 't1', observe: true });
+    assert.equal(attached.result.core, core);
+    assert.equal(attached.result.observe, true);
+  }
+
+  alpha.send(encodeFrame(5, 0, Buffer.from('input-for-alpha')));
+  beta.send(encodeFrame(5, 0, Buffer.from('input-for-beta')));
+  alpha.send(encodeFrame(5, 1, Buffer.from('alpha-drained')));
+  beta.send(encodeFrame(5, 1, Buffer.from('beta-drained')));
+  await waitFor(async () => {
+    const log = await readCoreLog(logFile);
+    return log.includes('alpha-drained') && log.includes('beta-drained');
+  }, 'both cores did not consume their frames');
+  const log = await readCoreLog(logFile);
+  assert.match(log, /^5 0 input-for-alpha core=alpha$/m);
+  assert.match(log, /^5 0 input-for-beta core=beta$/m);
+  assert.doesNotMatch(log, /input-for-alpha core=beta|input-for-beta core=alpha/);
+
+  await Promise.all([closeSocket(alpha), closeSocket(beta)]);
+});
+
+test('read-only restrictions apply on every selected core', { timeout: 10000 }, async (t) => {
+  const rw = 'test-rw-secret-that-is-not-logged';
+  const ro = 'test-ro-secret-that-is-not-logged';
+  const { port } = await startGateway(t, {
+    HC_CORES: 'alpha,beta',
+    HERDR_WEB_TOKEN: rw,
+    HERDR_WEB_RO_TOKEN: ro,
+  });
+  const sockets = [
+    await openCoreSocket(port, ro, 'alpha'),
+    await openCoreSocket(port, ro, 'beta'),
+  ];
+  await Promise.all(sockets.map(waitReady));
+  for (const [index, ws] of sockets.entries()) {
+    const blocked = await rpc(ws, 100 + index, 'terminal.run', {});
+    assert.match(blocked.error.message, /read-only/);
+    const attached = await rpc(ws, 110 + index, 'terminal.attach', { terminal: 't1', observe: false });
+    assert.equal(attached.result.observe, true);
+    assert.equal(attached.result.core, index === 0 ? 'alpha' : 'beta');
+  }
+  await Promise.all(sockets.map(closeSocket));
+});
+
+test('socket discovery filters holders and joins later cores without restart', { timeout: 10000 }, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'herdgate-discovery-'));
+  const listeners = [];
+  const listenSocket = (name) => new Promise((resolve, reject) => {
+    const listener = net.createServer();
+    listener.once('error', reject);
+    listener.listen(path.join(directory, name), () => {
+      listeners.push(listener);
+      resolve();
+    });
+  });
+  t.after(async () => {
+    await Promise.all(listeners.map((listener) => new Promise((resolve) => listener.close(resolve))));
+    await rm(directory, { recursive: true, force: true });
+  });
+  await listenSocket('alpha.sock');
+  await listenSocket('alpha.holder.deadbeef.sock');
+  await writeFile(path.join(directory, 'ordinary-file.sock'), 'not a socket');
+  await writeFile(
+    path.join(directory, 'hc'),
+    `#!/bin/sh\nexec "${process.execPath}" "${fakeCore}" "$@"\n`,
+    { mode: 0o755 },
+  );
+
+  const { port, token } = await startGateway(t, {
+    HC_CONNECT: '',
+    HC_SOCKET_DIR: directory,
+    PATH: `${directory}${path.delimiter}${process.env.PATH}`,
+  });
+  const listCores = async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/cores?token=${encodeURIComponent(token)}`);
+    assert.equal(response.status, 200);
+    return (await response.json()).cores;
+  };
+  assert.deepEqual(await listCores(), ['alpha']);
+
+  const alpha = await openCoreSocket(port, token, 'alpha');
+  await waitReady(alpha);
+  assert.equal((await rpc(alpha, 1, 'test.echo', { source: 'alpha' })).result.core, 'alpha');
+  await listenSocket('zeta.sock');
+  assert.deepEqual(await listCores(), ['alpha', 'zeta']);
+  const zeta = await openCoreSocket(port, token, 'zeta');
+  await waitReady(zeta);
+  assert.equal((await rpc(zeta, 1, 'test.echo', { source: 'zeta' })).result.core, 'zeta');
+  assert.equal(alpha.readyState, WebSocket.OPEN, 'adding a core disturbed the existing connection');
+  await Promise.all([closeSocket(alpha), closeSocket(zeta)]);
 });

@@ -43,6 +43,14 @@
 - Remove terminals and cached views for a core that disappears. Keep healthy
   cores usable when another core fails or reconnects.
 
+## Non-goals
+
+- Observe herdr-core only. The herdr TUI world and its sockets under
+  `~/.config/herdr` are not herdr-core API endpoints: do not discover, label or
+  bridge them as cores. TUI observation belongs to existing dedicated tools.
+- Remote enumeration over SSH is out of scope; explicit remote `HC_CONNECT`
+  keeps its existing single-core behavior.
+
 ## Tests and verification
 
 - Extend the fake core to report its `--session` and return distinct terminal

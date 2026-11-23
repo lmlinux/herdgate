@@ -106,7 +106,20 @@ body {
   font-size: 13px;
 }
 .term-item .addr { color: var(--amber); }
-.term-item .nm { color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-item .core-badge {
+  flex: none;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 5px;
+  border: 1px solid #34373d;
+  border-radius: 4px;
+  color: var(--mute);
+  background: #191b1e;
+  font: 10px/16px var(--mono);
+}
+.term-item .nm { color: var(--fg); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .term-item .row2 {
   margin-top: 3px;
   color: var(--dim);

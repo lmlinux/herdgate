@@ -1,17 +1,16 @@
 /**
- * herdgate frontend — using herdview's HerdConnection + HerdView
+ * herdgate frontend — one herdview connection per local herdr-core
  *
- * HerdConnection: WS lifecycle, auth, auto-reconnect, terminal list, event stream
- * HerdView: one terminal pane (mount, attach, observe, input, resize, focus, events)
- *
- * This file only handles the UI shell: sidebar, toolbar, container.
- * All protocol complexity lives in herdview.
+ * HerdConnection owns each core's WS lifecycle, terminal list and event stream.
+ * HerdView owns a terminal pane on that same connection. Composite
+ * [core, address] keys keep equal addresses on different cores independent.
  */
 
 import { HerdConnection, HerdView } from 'herdview';
 
 const TOKEN = window.__TOKEN__;
 const IS_RO = !!window.__RO_TOKEN__ && window.__RO_TOKEN__ === TOKEN;
+const CORE_REFRESH_MS = 5000;
 
 // ---------------------------------------------------------------- helpers
 
@@ -21,8 +20,11 @@ const setConn = (text, cls = '') => {
   el.textContent = text;
   el.className = 'side-foot ' + cls;
 };
+const keyFor = (core, address) => JSON.stringify([core, address]);
+const displayTitle = (core, address, name = '') => `${core}:${address}${name ? ` · ${name}` : ''}`;
 
 // ---------------------------------------------------------------- sidebar toggle
+
 const toggleBtn = document.createElement('button');
 toggleBtn.id = 'btn-toggle-sidebar';
 toggleBtn.textContent = '◀';
@@ -36,32 +38,123 @@ toggleBtn.onclick = () => {
 };
 document.body.append(toggleBtn);
 
-// ---------------------------------------------------------------- connection
+// ---------------------------------------------------------------- core state
 
-const connection = new HerdConnection({
-  url: `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`,
-  reconnect: true,
-  reconnectDelay: 1000,
-  maxReconnectDelay: 10000,
-});
+const connections = new Map(); // core -> { connection, state }
+const terms = new Map(); // JSON [core, address] -> terminal record + core/key
+let discoveredCores = [];
+let initialAttachDone = false;
 
-connection.on('status', (s) => {
-  if (s.state === 'connected') setConn('connected, subscribing…');
-  else if (s.state === 'disconnected') setConn('disconnected — reconnecting…', 'bad');
-  else if (s.state === 'reconnecting') setConn(`reconnecting… (attempt ${s.attempt || '?'})`, 'bad');
-});
+let currentView = null;
+let currentKey = '';
+let currentCore = '';
+let observePref = IS_RO;
 
-console.log('[herdgate] app.js 8e8cd52 — keyed list + attach race fix loaded');
-connection.on('terminals', ({ terminals }) => {
-  terms.clear();
-  for (const t of terminals) terms.set(t.address, t);
-  setConn(`ready · ${terms.size} terminal(s)`, 'ok');
+function updateConnSummary() {
+  const total = discoveredCores.length;
+  const ready = [...connections.values()].filter((entry) => entry.state === 'ready').length;
+  if (!total) setConn('no herdr-core sockets · retrying…');
+  else setConn(`${ready}/${total} core(s) ready · ${terms.size} terminal(s)`, ready === total ? 'ok' : ready ? '' : 'bad');
+  $('conn-state').title = [...connections]
+    .map(([core, entry]) => `${core}: ${entry.state}`)
+    .join('\n');
+  $('btn-new').title = `New terminal on ${coreForNew() || 'the first available core'}`;
+}
+
+function replaceCoreTerminals(core, terminals) {
+  for (const [key, terminal] of terms) {
+    if (terminal.core === core) terms.delete(key);
+  }
+  for (const terminal of terminals) {
+    if (!terminal?.address) continue;
+    const key = keyFor(core, terminal.address);
+    terms.set(key, { ...terminal, core, key });
+  }
+  updateConnSummary();
   scheduleRender();
-});
+}
+
+function maybeAutoAttach() {
+  if (initialAttachDone || currentKey) return;
+  const live = [...terms.values()]
+    .filter((terminal) => terminal.state !== 'finished')
+    .sort((a, b) => a.core.localeCompare(b.core)
+      || (a.created_ms || 0) - (b.created_ms || 0)
+      || a.address.localeCompare(b.address));
+  if (live.length) attachTo(live[0].key);
+}
+
+function connectCore(core) {
+  if (connections.has(core)) return;
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  const connection = new HerdConnection({
+    url: `${scheme}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}&core=${encodeURIComponent(core)}`,
+    reconnect: true,
+    reconnectDelay: 1000,
+    maxReconnectDelay: 10000,
+  });
+  const entry = { connection, state: 'idle' };
+  connections.set(core, entry);
+
+  connection.on('status', (status) => {
+    entry.state = status.state;
+    updateConnSummary();
+    if (status.state === 'ready') maybeAutoAttach();
+  });
+  connection.on('terminals', ({ terminals }) => replaceCoreTerminals(core, terminals));
+  connection.on('ready', () => maybeAutoAttach());
+  connection.on('error', ({ error }) => console.error(`[${core}]`, error));
+  connection.connect().catch((error) => {
+    console.error(`[${core}] connect failed`, error);
+    updateConnSummary();
+  });
+  updateConnSummary();
+}
+
+function removeCore(core) {
+  const entry = connections.get(core);
+  if (!entry) return;
+  entry.connection.destroy();
+  connections.delete(core);
+  for (const [key, terminal] of terms) {
+    if (terminal.core === core) terms.delete(key);
+  }
+  if (pendingEntry?.core === core) {
+    ++attachGen;
+    destroyCurrentView();
+  }
+  for (const viewEntry of [...viewsByKey.values()]) {
+    if (viewEntry.core === core) evictView(viewEntry);
+  }
+  if (currentCore === core) {
+    currentView = null;
+    currentKey = '';
+    currentCore = '';
+    setTitle(`${core} · disconnected`);
+  }
+  updateConnSummary();
+  scheduleRender();
+}
+
+async function refreshCores() {
+  try {
+    const response = await fetch(`/api/cores?token=${encodeURIComponent(TOKEN)}`, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`core discovery returned HTTP ${response.status}`);
+    const payload = await response.json();
+    const names = [...new Set((payload.cores || []).filter((name) => typeof name === 'string' && name))];
+    discoveredCores = names;
+    for (const core of names) connectCore(core);
+    for (const core of [...connections.keys()]) {
+      if (!names.includes(core)) removeCore(core);
+    }
+    updateConnSummary();
+  } catch (error) {
+    console.error('core discovery:', error);
+    setConn('core discovery failed · retrying…', 'bad');
+  }
+}
 
 // ---------------------------------------------------------------- sidebar
-
-const terms = new Map();
 
 let renderQueued = false;
 const scheduleRender = () => {
@@ -96,144 +189,140 @@ clearBtn.type = 'button';
 clearBtn.textContent = 'clear finished';
 clearBtn.className = 'side-action';
 clearBtn.onclick = async () => {
-  const finished = [...terms.values()].filter((t) => t.state === 'finished');
-  for (const t of finished) {
-    try { await connection.rpc('terminal.rm', { terminal: t.address }); } catch (e) { console.error(e); }
+  const finished = [...terms.values()].filter((terminal) => terminal.state === 'finished');
+  for (const terminal of finished) {
+    try {
+      await connections.get(terminal.core)?.connection.rpc('terminal.rm', { terminal: terminal.address });
+    } catch (error) {
+      console.error(error);
+    }
   }
   scheduleRender();
 };
 sidebarFoot.append(clearBtn);
 
 const span = (text, cls) => {
-  const s = document.createElement('span');
-  s.className = cls || '';
-  s.textContent = text;
-  return s;
+  const element = document.createElement('span');
+  element.className = cls || '';
+  element.textContent = text;
+  return element;
 };
 
-function statusOf(t) {
-  if (t.state === 'finished') return 'finished';
-  return t.status?.state || 'idle';
+function statusOf(terminal) {
+  if (terminal.state === 'finished') return 'finished';
+  return terminal.status?.state || terminal.status || 'idle';
 }
 
-// Keyed incremental list rendering: one persistent <li> node per terminal
-// address. The old full-rebuild (innerHTML = '' on every terminals push)
-// replaced every node mid-click while agents were active (mousedown on node
-// vN, mouseup on its replacement -> no click event), which made switching
-// need many attempts. Rebuilding only a row's CONTENT keeps the clickable
-// node identity stable; even if a row's children change between mousedown
-// and mouseup, the click dispatches on the common ancestor <li>.
-const liByAddr = new Map();
+// Persistent keyed rows avoid replacing a clicked node during active updates.
+const liByKey = new Map();
 
-function rowSig(t, on) {
+function rowSig(terminal, on) {
   return [
-    t.name,
-    t.title,
-    (t.argv && t.argv[0]) || '',
-    t.state,
-    t.status?.msg,
-    t.foreground?.name,
-    t.cwd,
+    terminal.core,
+    terminal.name,
+    terminal.title,
+    (terminal.argv && terminal.argv[0]) || terminal.agent || '',
+    terminal.state,
+    terminal.status?.msg || terminal.status,
+    terminal.foreground?.name,
+    terminal.cwd,
     on ? 1 : 0,
-    t.state === 'finished' ? 1 : 0,
+    terminal.state === 'finished' ? 1 : 0,
   ].join('\u0001');
 }
 
 function renderList() {
   const ul = $('term-list');
   const arr = [...terms.values()]
-    .filter((t) => showHistory || t.state !== 'finished')
-    .sort((a, b) => (a.created_ms || 0) - (b.created_ms || 0));
+    .filter((terminal) => showHistory || terminal.state !== 'finished')
+    .sort((a, b) => a.core.localeCompare(b.core)
+      || (a.created_ms || 0) - (b.created_ms || 0)
+      || a.address.localeCompare(b.address));
   ul.textContent = '';
   if (!arr.length) {
     ul.innerHTML = `<li class="empty">(${terms.size ? 'no active terminals' : 'no terminals yet'})</li>`;
-    liByAddr.clear();
+    liByKey.clear();
     return;
   }
   const seen = new Set();
-  for (const t of arr) {
-    seen.add(t.address);
-    const on = currentView && currentView.address === t.address;
-    const sig = rowSig(t, on);
-    let li = liByAddr.get(t.address);
+  for (const terminal of arr) {
+    const key = terminal.key;
+    seen.add(key);
+    const on = currentKey === key;
+    const sig = rowSig(terminal, on);
+    let li = liByKey.get(key);
     if (li && li._sig === sig) {
-      ul.appendChild(li); // existing node unchanged: reposition only
+      ul.appendChild(li);
       continue;
     }
     if (!li) {
       li = document.createElement('li');
       li.className = 'term-item';
-      li.onclick = () => attachTo(t.address);
+      li.onclick = () => attachTo(key);
     }
-    li.className =
-      'term-item' + (on ? ' on' : '') + (t.state === 'finished' ? ' finished dim' : '');
-    li.title = `${t.address}${t.name ? ' · ' + t.name : ''} · ${t.cwd || ''}`;
+    li.className = `term-item${on ? ' on' : ''}${terminal.state === 'finished' ? ' finished dim' : ''}`;
+    li.title = `${displayTitle(terminal.core, terminal.address, terminal.name)} · ${terminal.cwd || ''}`;
     li.textContent = '';
 
     const row1 = document.createElement('div');
     row1.className = 'row1';
-    const argv0 = (t.argv && t.argv[0] && t.argv[0].split('/').pop()) || '';
-    const label = t.name || t.title || argv0 || '';
-    row1.append(span(t.address, 'addr'), span(label, 'nm'), span('', 'dot ' + statusOf(t)));
+    const argv0 = (terminal.argv && terminal.argv[0] && terminal.argv[0].split('/').pop()) || terminal.agent || '';
+    const label = terminal.name || terminal.title || argv0 || '';
+    row1.append(
+      span(terminal.core, 'core-badge'),
+      span(terminal.address, 'addr'),
+      span(label, 'nm'),
+      span('', `dot ${statusOf(terminal)}`),
+    );
 
     const row2 = document.createElement('div');
     row2.className = 'row2';
     const bits = [];
-    if (t.status?.msg) bits.push(String(t.status.msg).slice(0, 40));
-    if (t.foreground?.name) bits.push(t.foreground.name);
-    if (t.cwd) bits.push(t.cwd);
+    if (terminal.status?.msg) bits.push(String(terminal.status.msg).slice(0, 40));
+    if (terminal.foreground?.name) bits.push(terminal.foreground.name);
+    if (terminal.cwd) bits.push(terminal.cwd);
     row2.textContent = bits.join(' · ');
 
     li.append(row1, row2);
     li._sig = sig;
-    liByAddr.set(t.address, li);
+    liByKey.set(key, li);
     ul.appendChild(li);
   }
-  for (const addr of [...liByAddr.keys()]) {
-    if (!seen.has(addr)) liByAddr.delete(addr);
+  for (const key of [...liByKey.keys()]) {
+    if (!seen.has(key)) liByKey.delete(key);
   }
 }
 
-// ---------------------------------------------------------------- terminal view
-
-let currentView = null;
-let observePref = IS_RO; // read-only token forces observe
-
-const termBox = $('term-container');
+// ---------------------------------------------------------------- terminal views
 
 function setTitle(text) {
   $('term-title').textContent = text;
 }
 
-// View cache: keep one live, still-attached HerdView per terminal in its own
-// wrapper. Switching back to a viewed terminal is a display toggle (0ms)
-// instead of a full attach + scrollback replay + canvas render (~1s+).
-// HerdView.attach() wipes its mount container, so each view gets a private
-// wrapper inside #term-container.
-const viewsByAddr = new Map(); // addr -> { view, wrapper, title }
+function setModeBadge(observe) {
+  if (IS_RO) return;
+  $('mode-badge').hidden = !observe;
+}
+
+// One live HerdView per [core, address], bound to the correct core connection.
+const viewsByKey = new Map();
 const VIEW_CACHE_MAX = 6;
 let attachGen = 0;
+let pendingEntry = null;
 
 function evictView(entry) {
   if (!entry) return;
-  viewsByAddr.delete(viewsByAddrGetKey(entry));
+  viewsByKey.delete(entry.key);
   try { entry.view.destroy(); } catch {}
   entry.wrapper.remove();
 }
-function viewsByAddrGetKey(entry) {
-  for (const [k, v] of viewsByAddr) if (v === entry) return k;
-  return null;
-}
 
 function showEntry(entry) {
-  for (const [, e] of viewsByAddr) e.wrapper.style.display = 'none';
+  for (const other of viewsByKey.values()) other.wrapper.style.display = 'none';
   entry.wrapper.style.display = '';
 }
 
 function destroyCurrentView() {
-  // Superseded mid-attach (generation guard): tear the half-attached view down
-  // completely — it was never cached. A cached, fully-attached view is only
-  // hidden, never destroyed, so switching back is instant.
   if (pendingEntry) {
     try { pendingEntry.view.destroy(); } catch {}
     pendingEntry.wrapper.remove();
@@ -242,36 +331,44 @@ function destroyCurrentView() {
   currentView = null;
 }
 
-let pendingEntry = null;
+async function attachTo(key, { observe = observePref } = {}) {
+  const terminal = terms.get(key);
+  if (!terminal) return;
+  initialAttachDone = true;
+  const { core, address } = terminal;
+  if (currentView && currentKey === key) return;
+  currentKey = key;
+  currentCore = core;
 
-async function attachTo(addr, { observe = observePref } = {}) {
-  // Clicking the visible terminal is a no-op.
-  if (currentView && currentView.address === addr) return;
-  // Cached and still alive: instant switch.
-  const cached = viewsByAddr.get(addr);
+  const cached = viewsByKey.get(key);
   if (cached && !cached.view.destroyed) {
     showEntry(cached);
     currentView = cached.view;
-    setTitle(cached.title ? `${addr} · ${cached.title}` : addr);
+    setModeBadge(cached.view.observe);
+    setTitle(displayTitle(core, address, cached.title || terminal.name));
     scheduleRender();
     return;
   }
   if (cached) evictView(cached);
-  // Generation guard: rapid clicks start several async attaches on the shared
-  // connection; only the latest one may win. A late-finishing stale attach
-  // used to overwrite currentView, leaving the title/highlight out of sync
-  // with the visible pane.
+
+  const coreEntry = connections.get(core);
+  if (!coreEntry) {
+    setTitle(displayTitle(core, address, 'core unavailable'));
+    return;
+  }
+
   const gen = ++attachGen;
   destroyCurrentView();
-  setTitle(`${addr} · attaching…`);
+  setTitle(`${displayTitle(core, address)} · attaching…`);
+  scheduleRender();
 
   const wrapper = document.createElement('div');
   wrapper.className = 'view-slot';
-  termBox.appendChild(wrapper);
-  const entry = { wrapper, title: '' };
+  $('term-container').appendChild(wrapper);
+  const entry = { key, core, address, wrapper, title: '' };
   pendingEntry = entry;
 
-  const view = new HerdView(connection, {
+  const view = new HerdView(coreEntry.connection, {
     history: 500,
     autoFocus: !observe,
     terminalOptions: {
@@ -282,30 +379,31 @@ async function attachTo(addr, { observe = observePref } = {}) {
   entry.view = view;
   view.mount(wrapper);
 
-  view.on('status', (st) => {
+  view.on('status', (status) => {
     if (currentView === view) scheduleRender();
-    if (st.state === 'closed') {
-      const e = viewsByAddr.get(addr);
-      if (e === entry) evictView(entry);
+    if (status.state === 'closed') {
+      const cachedEntry = viewsByKey.get(key);
+      if (cachedEntry === entry) {
+        evictView(entry);
+        if (currentView === view) currentView = null;
+      }
     }
   });
   view.on('title', ({ title }) => {
     entry.title = title || entry.title;
-    if (currentView === view && title) setTitle(`${view.address} · ${title}`);
+    if (currentView === view && title) setTitle(displayTitle(core, address, title));
   });
 
   try {
-    await view.attach(addr, { observe });
-  } catch (e) {
+    await view.attach(address, { observe });
+  } catch (error) {
     view.destroy();
     wrapper.remove();
-    if (gen === attachGen) setTitle(`${addr} · attach failed: ${e.message}`);
+    if (gen === attachGen) setTitle(displayTitle(core, address, `attach failed: ${error.message}`));
     if (pendingEntry === entry) pendingEntry = null;
     return;
   }
   if (gen !== attachGen) {
-    // A newer click superseded this attach: discard the stale view before it
-    // can overwrite currentView or leak its mount.
     view.destroy();
     wrapper.remove();
     if (pendingEntry === entry) pendingEntry = null;
@@ -313,18 +411,17 @@ async function attachTo(addr, { observe = observePref } = {}) {
   }
   if (pendingEntry === entry) pendingEntry = null;
 
-  viewsByAddr.set(addr, entry);
-  // LRU cap: evict the oldest cached entry beyond the max.
-  while (viewsByAddr.size > VIEW_CACHE_MAX) {
-    const oldest = viewsByAddr.entries().next().value;
+  viewsByKey.set(key, entry);
+  while (viewsByKey.size > VIEW_CACHE_MAX) {
+    const oldest = viewsByKey.entries().next().value;
     if (oldest && oldest[1] !== entry) evictView(oldest[1]);
     else break;
   }
 
   showEntry(entry);
   currentView = view;
-  $('mode-badge').hidden = !observe;
-  setTitle(`${addr}${terms.get(addr)?.name ? ' · ' + terms.get(addr).name : ''}`);
+  setModeBadge(observe);
+  setTitle(displayTitle(core, address, terminal.name));
   if (!observe) view.focus();
   scheduleRender();
 }
@@ -332,67 +429,66 @@ async function attachTo(addr, { observe = observePref } = {}) {
 if (IS_RO) {
   $('btn-new').style.display = 'none';
   $('btn-kill').style.display = 'none';
-  // observe is locked on for read-only — the toggle must not offer a way out
   $('btn-observe').style.display = 'none';
-  // clear-finished calls terminal.rm, which the gateway blocks for read-only
-  $('btn-clear-finished').style.display = 'none';
+  clearBtn.style.display = 'none';
   $('mode-badge').hidden = false;
   $('mode-badge').textContent = '👁 read-only';
 }
 
 // ---------------------------------------------------------------- toolbar
 
+function coreForNew() {
+  if (currentCore && connections.has(currentCore)) return currentCore;
+  if (discoveredCores.includes('default')) return 'default';
+  return discoveredCores.find((core) => connections.get(core)?.state === 'ready') || discoveredCores[0] || '';
+}
+
 $('btn-observe').onclick = () => {
   observePref = !observePref;
   $('btn-observe').classList.toggle('on', observePref);
-  if (currentView) {
-    // Mode change must re-attach, not hit the view cache: evict the current
-    // entry first so attachTo does a fresh attach in the new mode.
-    const addr = currentView.address;
-    const e = viewsByAddr.get(addr);
-    if (e) { viewsByAddr.delete(addr); try { e.view.destroy(); } catch {} e.wrapper.remove(); }
-    if (currentView === e?.view) currentView = null;
-    attachTo(addr, { observe: observePref });
+  if (currentKey) {
+    const key = currentKey;
+    const entry = viewsByKey.get(key);
+    if (entry) evictView(entry);
+    currentView = null;
+    attachTo(key, { observe: observePref });
   }
 };
 
 $('btn-new').onclick = async () => {
+  const core = coreForNew();
+  const coreEntry = connections.get(core);
+  if (!coreEntry) {
+    setTitle('create failed: no herdr-core is available');
+    return;
+  }
   try {
-    const rec = await connection.rpc('terminal.run', { size: { cols: 110, rows: 32 } });
-    if (rec?.address) {
-      terms.set(rec.address, rec);
+    const record = await coreEntry.connection.rpc('terminal.run', { size: { cols: 110, rows: 32 } });
+    if (record?.address) {
+      const key = keyFor(core, record.address);
+      terms.set(key, { ...record, core, key });
       scheduleRender();
-      attachTo(rec.address);
+      attachTo(key);
     }
-  } catch (e) {
-    console.error('btn-new:', e);
-    setTitle(`create failed: ${e.message}`);
+  } catch (error) {
+    console.error('btn-new:', error);
+    setTitle(`${core} · create failed: ${error.message}`);
   }
 };
 
 $('btn-kill').onclick = async () => {
-  if (!currentView) return;
+  if (!currentView || !currentCore) return;
+  const core = currentCore;
   try {
-    await connection.rpc('terminal.kill', { terminal: currentView.address });
-  } catch (e) {
-    console.error('btn-kill:', e);
-    setTitle(`kill failed: ${e.message}`);
+    await connections.get(core)?.connection.rpc('terminal.kill', { terminal: currentView.address });
+  } catch (error) {
+    console.error('btn-kill:', error);
+    setTitle(`${core} · kill failed: ${error.message}`);
   }
 };
 
 // ---------------------------------------------------------------- init
 
-(async () => {
-  try {
-    await connection.connect();
-  } catch (e) {
-    setConn(`connection failed: ${e.message}`, 'bad');
-    return;
-  }
-
-  const live = [...terms.values()]
-    .sort((a, b) => (a.created_ms || 0) - (b.created_ms || 0))
-    .find((t) => t.state !== 'finished');
-  if (live) await attachTo(live.address);
-  else termBox.innerHTML = '<div class="hint">Pick a terminal on the left to attach, or click "+ New" for a shell.</div>';
-})();
+$('term-container').innerHTML = '<div class="hint">Pick a terminal on the left to attach, or click "+ New" for a shell.</div>';
+await refreshCores();
+setInterval(refreshCores, CORE_REFRESH_MS);
