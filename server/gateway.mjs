@@ -5,7 +5,9 @@
  * Deliberately minimal:
  *   1. Serves the static frontend (with a same-origin WebSocket token)
  *   2. WebSocket auth (token + same-origin Origin check)
- *   3. One `hc connect` child process per WebSocket connection:
+ *   3. One `hc connect` child process per browser/core WebSocket connection:
+ *        - discovery: public <name>.sock endpoints in the user's runtime dir
+ *        - selection: /ws?core=<name> appends --session <name> to HC_CONNECT
  *        - handshake: plain JSON line hello{framed:true} → binary frames after
  *        - browser binary messages = hc frames, written to the child's stdin as-is
  *        - browser text messages   = JSON-RPC requests, wrapped as channel 0 DATA frames
@@ -14,8 +16,9 @@
  *      frames flow browser ↔ core directly), so herdr-core's flow control
  *      (backpressure) semantics hold end to end.
  *
- * hc connect comes from the HC_CONNECT env var, default "hc connect"
- * (the local core). Remote machine: HC_CONNECT="ssh box hc connect".
+ * By default the gateway discovers every local core and runs one child per
+ * selected core. Explicit HC_CONNECT="ssh box hc connect" retains the original
+ * single-upstream behavior; HC_CORES can instead select named sessions.
  *
  * Security: loopback bind by default; a non-loopback bind requires an explicit
  * HERDR_WEB_TOKEN — put TLS / a reverse proxy in front yourself.

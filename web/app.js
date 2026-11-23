@@ -28,13 +28,13 @@ const displayTitle = (core, address, name = '') => `${core}:${address}${name ? `
 const toggleBtn = document.createElement('button');
 toggleBtn.id = 'btn-toggle-sidebar';
 toggleBtn.textContent = '◀';
-toggleBtn.style.cssText = 'position:fixed;left:280px;top:50%;transform:translateY(-50%);z-index:10;background:var(--panel);border:1px solid var(--line);border-left:0;border-radius:0 6px 6px 0;color:var(--dim);cursor:pointer;padding:12px 6px;font-size:12px;transition:left 0.2s';
+toggleBtn.style.cssText = 'position:fixed;left:var(--sidebar-width);top:50%;transform:translateY(-50%);z-index:10;background:var(--panel);border:1px solid var(--line);border-left:0;border-radius:0 6px 6px 0;color:var(--dim);cursor:pointer;padding:12px 6px;font-size:12px;transition:left 0.2s';
 toggleBtn.onclick = () => {
   const sb = $('sidebar');
   sb.classList.toggle('collapsed');
   const collapsed = sb.classList.contains('collapsed');
   toggleBtn.textContent = collapsed ? '▶' : '◀';
-  toggleBtn.style.left = collapsed ? '0px' : '280px';
+  toggleBtn.style.left = collapsed ? '0px' : 'var(--sidebar-width)';
 };
 document.body.append(toggleBtn);
 
@@ -136,7 +136,10 @@ function removeCore(core) {
   scheduleRender();
 }
 
+let refreshingCores = false;
 async function refreshCores() {
+  if (refreshingCores) return;
+  refreshingCores = true;
   try {
     const response = await fetch(`/api/cores?token=${encodeURIComponent(TOKEN)}`, { cache: 'no-store' });
     if (!response.ok) throw new Error(`core discovery returned HTTP ${response.status}`);
@@ -151,6 +154,8 @@ async function refreshCores() {
   } catch (error) {
     console.error('core discovery:', error);
     setConn('core discovery failed · retrying…', 'bad');
+  } finally {
+    refreshingCores = false;
   }
 }
 
