@@ -17,8 +17,8 @@
  *      (backpressure) semantics hold end to end.
  *
  * By default the gateway discovers every local core and runs one child per
- * selected core. Explicit HC_CONNECT="ssh box hc connect" retains the original
- * single-upstream behavior; HC_CORES can instead select named sessions.
+ * selected core. Explicit HC_CONNECT="ssh box hc connect" always retains the
+ * original single-upstream behavior and cannot be combined with HC_CORES.
  *
  * Security: loopback bind by default; a non-loopback bind requires an explicit
  * HERDR_WEB_TOKEN — put TLS / a reverse proxy in front yourself.
@@ -43,9 +43,9 @@ Options:
 Environment variables:
   PORT             HTTP/WebSocket port (default: 8787)
   HOST             Bind address (default: 127.0.0.1)
-  HC_CONNECT       Command used to connect to herdr-core (default: hc connect)
-                   Explicitly setting this retains single-core mode unless HC_CORES is set
-  HC_CORES         Comma-separated core names; appends --session NAME per connection
+  HC_CONNECT       Command used to connect to one herdr-core (default: hc connect)
+                   Explicitly setting this forces single-core mode; cannot combine with HC_CORES
+  HC_CORES         Comma-separated core names; uses hc connect --session NAME per connection
   HC_SOCKET_DIR    Core socket directory (default: $XDG_RUNTIME_DIR/herdr-core)
   HERDR_WEB_TOKEN  Browser/WebSocket token (required for a non-loopback HOST)
   HERDR_WEB_RO_TOKEN  Optional read-only browser/WebSocket token
@@ -69,9 +69,13 @@ const HOST = process.env.HOST || '127.0.0.1';
 const HC_CONNECT = process.env.HC_CONNECT || 'hc connect';
 const HC_SOCKET_DIR = process.env.HC_SOCKET_DIR || defaultSocketDir();
 const configuredCores = parseCoreList(process.env.HC_CORES || '');
-// An explicit HC_CONNECT remains the backwards-compatible single-upstream
-// mode (including ssh). HC_CORES opts that command into per-session routing.
-const singleCore = Boolean(process.env.HC_CONNECT) && configuredCores.length === 0;
+// Explicit HC_CONNECT is always the backwards-compatible single-upstream mode
+// (including ssh). Named multi-core sessions use the default hc connect command.
+if (process.env.HC_CONNECT && configuredCores.length) {
+  console.error('HC_CONNECT forces single-core mode and cannot be combined with HC_CORES; use HC_CORES with the default hc connect command.');
+  process.exit(1);
+}
+const singleCore = Boolean(process.env.HC_CONNECT);
 let availableCores = singleCore ? ['default'] : [...configuredCores];
 const refreshDiscoveredCores = createCoreRefresher(HC_SOCKET_DIR);
 

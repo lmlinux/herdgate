@@ -35,8 +35,8 @@ HC_CONNECT="ssh box hc connect" npm start
 Environment variables:
 
 - `PORT` (default `8787`) and `HOST` (default `127.0.0.1`)
-- `HC_CONNECT` — explicit upstream command; without `HC_CORES`, preserves the original single-core behavior (default command: `hc connect`)
-- `HC_CORES` — optional comma-separated core names, instead of socket discovery; the gateway appends `--session <name>` to the connect command for each browser/core connection
+- `HC_CONNECT` — explicit single-core upstream command, including SSH; cannot be combined with `HC_CORES` (default command: `hc connect`)
+- `HC_CORES` — optional comma-separated core names, instead of socket discovery; uses the default `hc connect` command and appends `--session <name>` for each browser/core connection
 - `HC_SOCKET_DIR` — override the local discovery directory
 - `HERDR_WEB_TOKEN` — optional for loopback, required otherwise
 - `HERDR_WEB_RO_TOKEN` — optional read-only token

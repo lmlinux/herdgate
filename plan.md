@@ -9,8 +9,9 @@
   non-socket entries. The live machine confirms its `default.sock` and
   `shepherdr.sock` accept API connections; holder sockets are internal.
 - Optionally set `HC_CORES=default,shepherdr` to use a configured list instead
-  of scanning. An explicit `HC_CONNECT` without `HC_CORES` retains the existing
-  single-upstream behavior, including `ssh box hc connect`.
+  of scanning, with the default `hc connect` command. Explicit `HC_CONNECT`
+  always retains single-upstream behavior, including `ssh box hc connect`, and
+  is rejected when combined with `HC_CORES`.
 - Re-scan every 5 seconds and expose the result at authenticated `GET
   /api/cores`. The browser polls it, so newly appearing cores join without a
   gateway restart. Socket scanning is cheap and needs no core cooperation, but

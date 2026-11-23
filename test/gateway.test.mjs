@@ -33,6 +33,17 @@ const waitFor = async (predicate, message, timeout = 5000) => {
   throw new Error(message);
 };
 
+const fakeHcPath = async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'herdgate-fake-hc-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await writeFile(
+    path.join(directory, 'hc'),
+    `#!/bin/sh\nexec "${process.execPath}" "${fakeCore}" "$@"\n`,
+    { mode: 0o755 },
+  );
+  return `${directory}${path.delimiter}${process.env.PATH}`;
+};
+
 const startGateway = async (t, extraEnv = {}) => {
   const port = await freePort();
   const child = spawn(process.execPath, [gateway], {
@@ -405,6 +416,28 @@ test('non-loopback bind requires an explicit secret', async () => {
   assert.match(output, /HERDR_WEB_TOKEN/);
 });
 
+test('explicit HC_CONNECT rejects multi-core HC_CORES configuration', async () => {
+  const port = await freePort();
+  const child = spawn(process.execPath, [gateway], {
+    cwd: root,
+    env: {
+      ...process.env,
+      HOST: '127.0.0.1',
+      PORT: String(port),
+      HC_CONNECT: `${process.execPath} ${fakeCore}`,
+      HC_CORES: 'alpha,beta',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  child.stdout.on('data', (data) => { output += data; });
+  child.stderr.on('data', (data) => { output += data; });
+  const code = await new Promise((resolve) => child.once('exit', resolve));
+  assert.equal(code, 1);
+  assert.match(output, /HC_CONNECT forces single-core mode and cannot be combined with HC_CORES/);
+  assert.doesNotMatch(output, /gateway listening/);
+});
+
 test('--help and -h print usage without starting the gateway', async () => {
   for (const flag of ['--help', '-h']) {
     const child = spawn(process.execPath, [gateway, flag], {
@@ -504,7 +537,9 @@ test('configured cores route lists, attachments and frames independently', { tim
   const logFile = path.join(os.tmpdir(), `herdgate-multicore-${process.pid}-${Date.now()}.log`);
   t.after(() => rm(logFile, { force: true }));
   const { port, token } = await startGateway(t, {
+    HC_CONNECT: '',
     HC_CORES: 'alpha,beta',
+    PATH: await fakeHcPath(t),
     FAKE_LOG_FILE: logFile,
   });
 
@@ -550,7 +585,9 @@ test('read-only restrictions apply on every selected core', { timeout: 10000 }, 
   const rw = 'test-rw-secret-that-is-not-logged';
   const ro = 'test-ro-secret-that-is-not-logged';
   const { port } = await startGateway(t, {
+    HC_CONNECT: '',
     HC_CORES: 'alpha,beta',
+    PATH: await fakeHcPath(t),
     HERDR_WEB_TOKEN: rw,
     HERDR_WEB_RO_TOKEN: ro,
   });
