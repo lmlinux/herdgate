@@ -139,6 +139,9 @@ test('clicking a cached core cancels a slow attach without misrouting kill', asy
   });
   let source = await readFile(path.join(root, 'web', 'app.js'), 'utf8');
   source = source.replace("import { HerdConnection, HerdView } from 'herdview';", '');
+  source = source.replace("import { debounceViewResize, terminalSize } from './terminal-helpers.js';", '');
+  context.debounceViewResize = () => {};
+  context.terminalSize = () => null;
   await vm.runInNewContext(`(async () => {\n${source}\n})()`, context);
   await flush();
   await flush();

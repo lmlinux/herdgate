@@ -35,7 +35,7 @@
   },
   "scripts": {
     "start": "node server/gateway.mjs",
-    "check": "node --check server/gateway.mjs && node --check server/cores.mjs && node --check web/app.js",
+    "check": "node --check server/gateway.mjs && node --check server/cores.mjs && node --check web/app.js && node --check web/terminal-helpers.js",
     "test": "node --test test/*.test.mjs"
   },
   "engines": {

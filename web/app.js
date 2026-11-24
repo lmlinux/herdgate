@@ -7,6 +7,7 @@
  */
 
 import { HerdConnection, HerdView } from 'herdview';
+import { debounceViewResize, terminalSize } from './terminal-helpers.js';
 
 const TOKEN = window.__TOKEN__;
 const IS_RO = !!window.__RO_TOKEN__ && window.__RO_TOKEN__ === TOKEN;
@@ -387,6 +388,7 @@ async function attachTo(key, { observe = observePref } = {}) {
     },
   });
   entry.view = view;
+  debounceViewResize(view);
   view.mount(wrapper);
 
   view.on('status', (status) => {
@@ -473,7 +475,9 @@ $('btn-new').onclick = async () => {
     return;
   }
   try {
-    const record = await coreEntry.connection.rpc('terminal.run', { size: { cols: 110, rows: 32 } });
+    const cachedView = [...viewsByKey.values()].find((entry) => terminalSize(entry.view))?.view;
+    const size = terminalSize(currentView) || terminalSize(cachedView);
+    const record = await coreEntry.connection.rpc('terminal.run', size ? { size } : {});
     if (record?.address) {
       const key = keyFor(core, record.address);
       terms.set(key, { ...record, core, key });

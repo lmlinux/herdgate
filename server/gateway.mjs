@@ -223,6 +223,7 @@ function loadStatic() {
   return new Map([
     ['/', { body: Buffer.from(html, 'utf8'), type: 'text/html; charset=utf-8', template: true }],
     ['/app.js', { body: readFileSync(path.join(WEB_ROOT, 'app.js')), type: 'text/javascript; charset=utf-8' }],
+    ['/terminal-helpers.js', { body: readFileSync(path.join(WEB_ROOT, 'terminal-helpers.js')), type: 'text/javascript; charset=utf-8' }],
     ['/app.css', { body: readFileSync(path.join(WEB_ROOT, 'app.css')), type: 'text/css; charset=utf-8' }],
     // bundled dual-width terminal font (webfonts, ~6MB per weight)
     ...(['MapleMono-NF-CN-Regular.woff2', 'MapleMono-NF-CN-Bold.woff2'].map((f) => [
