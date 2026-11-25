@@ -54,7 +54,7 @@ class MockElement {
 test('clicking a cached core cancels a slow attach without misrouting kill', async () => {
   const ids = [
     'sidebar', 'conn-state', 'term-list', 'term-title', 'term-container',
-    'mode-badge', 'btn-new', 'btn-kill', 'btn-observe',
+    'btn-new', 'btn-kill',
   ];
   const elements = new Map(ids.map((id) => [id, new MockElement('div', id)]));
   const document = {
@@ -104,7 +104,6 @@ test('clicking a cached core cancels a slow attach without misrouting kill', asy
       this.connection = connection;
       this.listeners = new Map();
       this.destroyed = false;
-      this.observe = false;
       this.address = null;
     }
     on(type, listener) {
@@ -112,9 +111,8 @@ test('clicking a cached core cancels a slow attach without misrouting kill', asy
       this.listeners.get(type).add(listener);
     }
     mount(wrapper) { this.wrapper = wrapper; }
-    attach(address, { observe }) {
+    attach(address) {
       this.address = address;
-      this.observe = observe;
       if (this.connection.core === 'beta') {
         return new Promise((resolve) => slowAttaches.push({ view: this, resolve: () => resolve(this) }));
       }
@@ -125,7 +123,7 @@ test('clicking a cached core cancels a slow attach without misrouting kill', asy
   }
 
   const context = vm.createContext({
-    window: { __TOKEN__: 'rw-token', __RO_TOKEN__: '' },
+    window: { __TOKEN__: 'rw-token' },
     document,
     location: { protocol: 'http:', host: '127.0.0.1:8787' },
     HerdConnection: MockConnection,

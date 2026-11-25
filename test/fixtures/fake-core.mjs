@@ -53,8 +53,7 @@ const handleRequest = (request) => {
       },
     });
   } else if (request.method === 'terminal.attach') {
-    // echo the observe flag so tests can assert the gateway forced it on
-    sendJson({ jsonrpc: '2.0', id: request.id, result: { channel: 5, observe: request.params?.observe, core: coreName } });
+    sendJson({ jsonrpc: '2.0', id: request.id, result: { channel: 5, core: coreName } });
   } else if (request.method === 'terminal.run') {
     sendJson({ jsonrpc: '2.0', id: request.id, result: { address: `${coreName}-t-fake`, core: coreName } });
   } else if (request.method === 'test.echo') {

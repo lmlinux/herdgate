@@ -55,7 +55,7 @@ export function debounceViewResize(view, delay = 200) {
         timer = null;
         const size = pending;
         pending = null;
-        if (!size || view.destroyed || view.observe || !attachment.open || view.attachment !== attachment) return;
+        if (!size || view.destroyed || !attachment.open || view.attachment !== attachment) return;
         send.call(attachment, size.cols, size.rows);
       }, delay);
       return attachment.open;

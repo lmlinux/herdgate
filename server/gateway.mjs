@@ -48,7 +48,6 @@ Environment variables:
   HC_CORES         Comma-separated core names; uses hc connect --session NAME per connection
   HC_SOCKET_DIR    Core socket directory (default: $XDG_RUNTIME_DIR/herdr-core)
   HERDR_WEB_TOKEN  Browser/WebSocket token (required for a non-loopback HOST)
-  HERDR_WEB_RO_TOKEN  Optional read-only browser/WebSocket token
 `);
   process.exit(0);
 }
@@ -107,24 +106,13 @@ function selectCore(requested) {
 
 const isLoopback = (h) => h === '127.0.0.1' || h === '::1' || h === 'localhost';
 const configuredToken = process.env.HERDR_WEB_TOKEN || '';
-const configuredRoToken = process.env.HERDR_WEB_RO_TOKEN || '';
 const TOKEN = configuredToken || randomBytes(24).toString('base64url');
-const RO_TOKEN = configuredRoToken || '';
-if (RO_TOKEN && RO_TOKEN === TOKEN) {
-  console.error('[warn] HERDR_WEB_RO_TOKEN equals HERDR_WEB_TOKEN: read-only connections get full access');
-}
-const pageNeedsToken = Boolean(configuredToken) || Boolean(configuredRoToken) || !isLoopback(HOST);
-const tokenMatches = (candidate, expected = TOKEN) => {
-  if (typeof candidate !== 'string' || !expected) return false;
-  const a = Buffer.from(expected);
+const pageNeedsToken = Boolean(configuredToken) || !isLoopback(HOST);
+const tokenMatches = (candidate) => {
+  if (typeof candidate !== 'string') return false;
+  const a = Buffer.from(TOKEN);
   const b = Buffer.from(candidate);
   return a.length === b.length && timingSafeEqual(a, b);
-};
-/** which token matched: 'rw' (full), 'ro' (read-only), or null */
-const tokenRole = (candidate) => {
-  if (tokenMatches(candidate)) return 'rw';
-  if (RO_TOKEN && tokenMatches(candidate, RO_TOKEN)) return 'ro';
-  return null;
 };
 const validHost = (req) => {
   if (!isLoopback(HOST)) return true;
@@ -166,18 +154,6 @@ for (const f of [DIST_JS, WASM]) {
 // ------------------------------------------------------------- frame codec
 
 const KDATA = 0;
-const KCREDIT = 1;
-const KCLOSE = 2;
-const KRESIZE = 3;
-const KFOCUS = 4;
-const KFACTS = 5;
-
-// read-only enforcement (fail-closed): the only JSON-RPC methods a read-only
-// connection may call, and the frame kinds it may never send. Input and resize
-// frames are dropped here, and terminal.attach is forced to observe:true —
-// herdr-core itself then rejects any input that slips past this list.
-const RO_RPC_ALLOW = new Set(['events.subscribe', 'terminal.list', 'terminal.attach']);
-const RO_BLOCKED_KINDS = new Set([KDATA, KRESIZE]);
 const KAUTO = 6;
 const HDR = 9; // [channel u32 LE][kind u8][len u32 LE]
 const MAX_PAYLOAD = 16 * 1024 * 1024; // protocol limit; oversized frames kill the link
@@ -216,9 +192,8 @@ class FrameReader {
 // ------------------------------------------------------------- static files
 
 function loadStatic() {
-  // index.html stays a raw template: the token that authenticated the request
-  // is injected per-visit (see the GET handler), so a visitor using the
-  // read-only token gets a page locked to observe mode — never the full one.
+  // index.html stays a raw template: the token is injected per-visit (see the
+  // GET handler), so the browser can authenticate its WebSocket connections.
   const html = readFileSync(path.join(WEB_ROOT, 'index.html'), 'utf8');
   return new Map([
     ['/', { body: Buffer.from(html, 'utf8'), type: 'text/html; charset=utf-8', template: true }],
@@ -277,7 +252,7 @@ const server = http.createServer(async (req, res) => {
       res.end('invalid host');
       return;
     }
-    if (!tokenRole(u.searchParams.get('token'))) {
+    if (!tokenMatches(u.searchParams.get('token'))) {
       res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
       res.end('unauthorized');
       return;
@@ -308,23 +283,16 @@ const server = http.createServer(async (req, res) => {
     res.end('invalid host');
     return;
   }
-  const role = u.pathname === '/' ? tokenRole(u.searchParams.get('token')) : null;
-  if (u.pathname === '/' && pageNeedsToken && !role) {
+  const authenticated = u.pathname === '/' && tokenMatches(u.searchParams.get('token'));
+  if (u.pathname === '/' && pageNeedsToken && !authenticated) {
     res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
-    res.end('unauthorized: append ?token=HERDR_WEB_TOKEN or ?token=HERDR_WEB_RO_TOKEN');
+    res.end('unauthorized: append ?token=HERDR_WEB_TOKEN');
     return;
   }
   let body = hit.body;
   if (hit.template) {
-    // embed the token that authenticated this request: 'ro' visitors get the
-    // read-only token (frontend forces observe mode, hides new/kill); everyone
-    // else — including loopback with no configured tokens — gets the full one
-    const active = role === 'ro' ? RO_TOKEN : TOKEN;
     body = Buffer.from(
-      hit.body
-        .toString('utf8')
-        .replace('__HERDR_WEB_TOKEN__', active)
-        .replace('__HERDR_WEB_RO_TOKEN__', RO_TOKEN),
+      hit.body.toString('utf8').replace('__HERDR_WEB_TOKEN__', TOKEN),
       'utf8',
     );
   }
@@ -352,8 +320,7 @@ server.on('upgrade', (req, socket, head) => {
   }
   if (u.pathname !== '/ws') return refuse(socket, 404, 'Not Found');
   if (!validHost(req)) return refuse(socket, 403, 'Invalid Host');
-  const role = tokenRole(u.searchParams.get('token'));
-  if (!role) return refuse(socket, 401, 'Unauthorized');
+  if (!tokenMatches(u.searchParams.get('token'))) return refuse(socket, 401, 'Unauthorized');
   const selectedCore = selectCore(u.searchParams.get('core') || '');
   if (!selectedCore) return refuse(socket, 404, 'Unknown Core');
   const origin = req.headers.origin; // browsers always send it; non-browser clients may not
@@ -366,7 +333,7 @@ server.on('upgrade', (req, socket, head) => {
       return refuse(socket, 403, 'Bad Origin');
     }
   }
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, role, selectedCore));
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, selectedCore));
 });
 
 /** Handshake with hc connect: send a plain hello{framed:true} line,
@@ -415,7 +382,7 @@ function handshake(child, cb) {
 
 let connSeq = 0;
 
-wss.on('connection', (ws, role = 'rw', selectedCore = { label: 'default', session: '' }) => {
+wss.on('connection', (ws, selectedCore = { label: 'default', session: '' }) => {
   const id = ++connSeq;
   const argv = HC_CONNECT.split(/\s+/).filter(Boolean);
   if (selectedCore.session) argv.push('--session', selectedCore.session);
@@ -507,9 +474,6 @@ wss.on('connection', (ws, role = 'rw', selectedCore = { label: 'default', sessio
       if (data.length < HDR || data.length > HDR + MAX_PAYLOAD) return;
       const len = data.readUInt32LE(5);
       if (HDR + len !== data.length) return;
-      // read-only: input (DATA) and resize frames never reach the core;
-      // CREDIT/CLOSE/FOCUS pass — flow control and clean detach must work
-      if (role === 'ro' && RO_BLOCKED_KINDS.has(data.readUInt8(4))) return;
       child.stdin.write(data);
     } else {
       // text = JSON-RPC request → wrapped as a channel 0 DATA frame
@@ -520,28 +484,6 @@ wss.on('connection', (ws, role = 'rw', selectedCore = { label: 'default', sessio
         return;
       }
       if (!msg || typeof msg.method !== 'string' || msg.id == null) return;
-      if (role === 'ro') {
-        if (!RO_RPC_ALLOW.has(msg.method)) {
-          // fail-closed allowlist: refuse with a JSON-RPC error instead of
-          // forwarding, so the caller's promise rejects rather than hangs.
-          // The reply travels as a channel-0 DATA frame — RPC answers are
-          // frames, so real clients (herdview) reject immediately instead of
-          // waiting out their RPC timeout on a text frame they never parse.
-          log(`read-only: blocked ${msg.method}`);
-          if (ws.readyState === 1) {
-            ws.send(encodeFrame(0, KDATA, Buffer.from(JSON.stringify({
-              jsonrpc: '2.0',
-              id: msg.id,
-              error: { code: -32000, message: `read-only: ${msg.method} is not permitted` },
-            }) + '\n', 'utf8')));
-          }
-          return;
-        }
-        if (msg.method === 'terminal.attach') {
-          // force observe:true — herdr-core rejects input on observe attachments
-          msg = { ...msg, params: { ...(msg.params || {}), observe: true } };
-        }
-      }
       child.stdin.write(encodeFrame(0, KDATA, Buffer.from(JSON.stringify(msg) + '\n', 'utf8')));
     }
   });
@@ -564,5 +506,4 @@ server.listen(PORT, HOST, () => {
   else console.log(`  discovering core API sockets in ${HC_SOCKET_DIR} (every 5s)`);
   if (pageNeedsToken) console.log('  open /?token=HERDR_WEB_TOKEN (the configured secret is not logged)');
   else console.log(`  local per-run WebSocket token: ${TOKEN}`);
-  if (RO_TOKEN) console.log('  read-only:   /?token=HERDR_WEB_RO_TOKEN (observe-only, cannot type/create/kill)');
 });

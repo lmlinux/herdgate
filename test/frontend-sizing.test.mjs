@@ -57,7 +57,6 @@ const mockView = () => {
   return {
     attachment: null,
     destroyed: false,
-    observe: false,
     on(type, listener) {
       if (!listeners.has(type)) listeners.set(type, new Set());
       listeners.get(type).add(listener);
@@ -118,7 +117,7 @@ test('resize bursts send only the latest size after 200 ms of stability', (t) =>
 test('clicking New passes the active renderer dimensions to terminal.run', async () => {
   const ids = [
     'sidebar', 'conn-state', 'term-list', 'term-title', 'term-container',
-    'mode-badge', 'btn-new', 'btn-kill', 'btn-observe',
+    'btn-new', 'btn-kill',
   ];
   const elements = new Map(ids.map((id) => [id, new MockElement('div', id)]));
   const document = {
@@ -164,7 +163,6 @@ test('clicking New passes the active renderer dimensions to terminal.run', async
       this.listeners = new Map();
       this.terminal = { cols: 137, rows: 41 };
       this.destroyed = false;
-      this.observe = false;
       this.attachment = null;
     }
     on(type, listener) {
@@ -176,9 +174,8 @@ test('clicking New passes the active renderer dimensions to terminal.run', async
       for (const listener of this.listeners.get(type) || []) listener(detail);
     }
     mount(wrapper) { this.wrapper = wrapper; }
-    async attach(address, { observe }) {
+    async attach(address) {
       this.address = address;
-      this.observe = observe;
       this.attachment = { open: true, resize() { return true; } };
       this.emit('status', { state: 'attached' });
       return this;
@@ -188,7 +185,7 @@ test('clicking New passes the active renderer dimensions to terminal.run', async
   }
 
   const context = vm.createContext({
-    window: { __TOKEN__: 'rw-token', __RO_TOKEN__: '' },
+    window: { __TOKEN__: 'rw-token' },
     document,
     location: { protocol: 'http:', host: '127.0.0.1:8787' },
     HerdConnection: MockConnection,

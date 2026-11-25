@@ -67,7 +67,7 @@ const startGateway = async (t, extraEnv = {}) => {
     }
   });
   await waitFor(() => output.includes('gateway listening'), `gateway did not start: ${output}`);
-  const configuredToken = extraEnv.HERDR_WEB_TOKEN || extraEnv.HERDR_WEB_RO_TOKEN;
+  const configuredToken = extraEnv.HERDR_WEB_TOKEN;
   const query = configuredToken ? `?token=${encodeURIComponent(configuredToken)}` : '';
   const response = await fetch(`http://127.0.0.1:${port}/${query}`);
   assert.equal(response.status, 200, output);
@@ -140,15 +140,6 @@ const readCoreLog = async (logFile) => {
   }
 };
 
-const drainCore = async (ws, logFile, marker) => {
-  ws.send(encodeFrame(77, 1, Buffer.from(marker)));
-  await waitFor(
-    async () => (await readCoreLog(logFile)).includes(marker),
-    `core did not consume post-attack CREDIT marker ${marker}`,
-  );
-  return readCoreLog(logFile);
-};
-
 const rejectedUpgrade = (url, options = {}) => new Promise((resolve, reject) => {
   const ws = new WebSocket(url, options);
   ws.once('unexpected-response', (_request, response) => {
@@ -192,9 +183,9 @@ test('configured secret protects the token-bearing page', { timeout: 10000 }, as
 });
 
 test('loopback pages inject a fresh random token for each gateway run', { timeout: 10000 }, async (t) => {
-  const noConfiguredTokens = { HERDR_WEB_TOKEN: '', HERDR_WEB_RO_TOKEN: '' };
-  const first = await startGateway(t, noConfiguredTokens);
-  const second = await startGateway(t, noConfiguredTokens);
+  const noConfiguredToken = { HERDR_WEB_TOKEN: '' };
+  const first = await startGateway(t, noConfiguredToken);
+  const second = await startGateway(t, noConfiguredToken);
   assert.match(first.token, /^[A-Za-z0-9_-]{32}$/);
   assert.match(second.token, /^[A-Za-z0-9_-]{32}$/);
   assert.notEqual(first.token, second.token);
@@ -218,187 +209,35 @@ test('loopback pages inject a fresh random token for each gateway run', { timeou
   }
 });
 
-test('read-only token yields a read-only page and socket', { timeout: 10000 }, async (t) => {
-  const rw = 'test-rw-secret-that-is-not-logged';
-  const ro = 'test-ro-secret-that-is-not-logged';
-  const { port } = await startGateway(t, { HERDR_WEB_TOKEN: rw, HERDR_WEB_RO_TOKEN: ro });
-  const rwHtml = await (await fetch(`http://127.0.0.1:${port}/?token=${rw}`)).text();
-  assert.match(rwHtml, new RegExp(`window\\.__TOKEN__ = "${rw}"`));
-  const roHtml = await (await fetch(`http://127.0.0.1:${port}/?token=${ro}`)).text();
-  // the RO page embeds the RO token, never the full one: the frontend uses the
-  // embedded token to detect read-only mode and to open the WebSocket
-  assert.match(roHtml, new RegExp(`window\\.__TOKEN__ = "${ro}"`));
-  assert.doesNotMatch(roHtml, new RegExp(rw));
-  const ws = await openSocket(port, ro, { origin: `http://127.0.0.1:${port}` });
-  await waitReady(ws);
-  await closeSocket(ws);
-});
-
-test('a read-only-only configuration protects the page and authenticates its socket', { timeout: 10000 }, async (t) => {
-  const ro = 'test-only-ro-secret-that-is-not-logged';
-  const { port, token } = await startGateway(t, {
-    HERDR_WEB_TOKEN: '',
-    HERDR_WEB_RO_TOKEN: ro,
-  });
-  assert.equal(token, ro);
-  assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 401);
-  assert.equal((await fetch(`http://127.0.0.1:${port}/?token=wrong`)).status, 401);
-
-  const html = await (await fetch(`http://127.0.0.1:${port}/?token=${ro}`)).text();
-  assert.ok(html.includes(`window.__TOKEN__ = "${ro}"`));
-  assert.ok(html.includes(`window.__RO_TOKEN__ = "${ro}"`));
-  assert.doesNotMatch(html, /__HERDR_WEB_TOKEN__|__HERDR_WEB_RO_TOKEN__/);
-  assert.equal(await rejectedUpgrade(`ws://127.0.0.1:${port}/ws`), 401);
-  assert.equal(await rejectedUpgrade(`ws://127.0.0.1:${port}/ws?token=wrong`), 401);
-
-  const ws = await openSocket(port, ro);
-  await waitReady(ws);
-  await closeSocket(ws);
-});
-
-test('read-only connections are enforced at the protocol level', { timeout: 10000 }, async (t) => {
-  const rw = 'test-rw-secret-that-is-not-logged';
-  const ro = 'test-ro-secret-that-is-not-logged';
-  const logFile = path.join(os.tmpdir(), `herdgate-ro-${process.pid}-${Date.now()}.log`);
-  const { port } = await startGateway(t, {
-    HERDR_WEB_TOKEN: rw,
-    HERDR_WEB_RO_TOKEN: ro,
-    FAKE_LOG_FILE: logFile,
-  });
-
-  const ws = await openSocket(port, ro, { origin: `http://127.0.0.1:${port}` });
-  await waitReady(ws);
-
-  // a write RPC is refused with a JSON-RPC error (a channel-0 frame, like
-  // every RPC answer), never forwarded to the core
-  const blocked = nextMessage(ws, (m) => m.channel === 0 && m.payload.toString().includes('"id":101'));
-  ws.send(JSON.stringify({ jsonrpc: '2.0', id: 101, method: 'terminal.run', params: {} }));
-  assert.match(JSON.parse((await blocked).payload.toString('utf8')).error.message, /read-only/);
-
-  // terminal.attach is forwarded with observe forced on — even if the client
-  // explicitly asks for a writable attachment (responses arrive as channel-0 frames)
-  const attached = nextMessage(ws, (m) => m.channel === 0 && m.payload.toString().includes('"id":102'));
-  ws.send(JSON.stringify({ jsonrpc: '2.0', id: 102, method: 'terminal.attach', params: { terminal: 't1', observe: false } }));
-  assert.equal(JSON.parse((await attached).payload.toString('utf8')).result.observe, true);
-
-  // binary input (DATA) and resize frames are dropped; CREDIT passes through
-  ws.send(encodeFrame(5, 0, Buffer.from('rm -rf /')));
-  ws.send(encodeFrame(5, 1, Buffer.from('credit')));
-  ws.send(encodeFrame(5, 3, Buffer.from('resize')));
-  // let the core consume what it was sent BEFORE the socket close kills it
-  // (the gateway SIGTERMs the child on browser disconnect — a race otherwise)
-  await delay(300);
-  await closeSocket(ws);
-
-  const log = await readFile(logFile, 'utf8');
-  assert.doesNotMatch(log, /terminal\.run/, 'blocked RPC reached the core');
-  assert.match(log, /terminal\.attach/, 'allowed RPC did not reach the core');
-  assert.doesNotMatch(log, /rm -rf/, 'input frame reached the core');
-  assert.match(log, /^5 1 /m, 'CREDIT frame was dropped');
-  assert.doesNotMatch(log, /^5 3 /m, 'resize frame reached the core');
-
-  // full-access connections are unaffected: run, input and resize all pass
-  const wsRw = await openSocket(port, rw, { origin: `http://127.0.0.1:${port}` });
-  await waitReady(wsRw);
-  const ran = nextMessage(wsRw, (m) => m.channel === 0 && m.payload.toString().includes('"id":201'));
-  wsRw.send(JSON.stringify({ jsonrpc: '2.0', id: 201, method: 'terminal.run', params: {} }));
-  assert.ok(JSON.parse((await ran).payload.toString('utf8')).result.address);
-  wsRw.send(encodeFrame(5, 0, Buffer.from('input-ok')));
-  wsRw.send(encodeFrame(5, 3, Buffer.from('resize-ok')));
-  // consume before close kills the core (same race as above)
-  await delay(300);
-  const log2 = await readFile(logFile, 'utf8');
-  assert.match(log2, /terminal\.run/);
-  assert.match(log2, /input-ok/);
-  assert.match(log2, /resize-ok/);
-  await closeSocket(wsRw);
-  await rm(logFile);
-});
-
-test('read-only RPC enforcement rejects disguised writes and binary RPC frames', { timeout: 10000 }, async (t) => {
-  const logFile = path.join(os.tmpdir(), `herdgate-ro-rpc-${process.pid}-${Date.now()}.log`);
+test('full-access connections pass RPC, input and resize', { timeout: 10000 }, async (t) => {
+  const secret = 'test-full-access-secret-that-is-not-logged';
+  const logFile = path.join(os.tmpdir(), `herdgate-rw-${process.pid}-${Date.now()}.log`);
   t.after(() => rm(logFile, { force: true }));
   const { port } = await startGateway(t, {
-    HERDR_WEB_TOKEN: 'test-rw-secret-that-is-not-logged',
-    HERDR_WEB_RO_TOKEN: 'test-ro-secret-that-is-not-logged',
+    HERDR_WEB_TOKEN: secret,
     FAKE_LOG_FILE: logFile,
   });
-  const ws = await openSocket(port, 'test-ro-secret-that-is-not-logged');
+
+  const ws = await openSocket(port, secret, { origin: `http://127.0.0.1:${port}` });
   await waitReady(ws);
-  const nextReply = (id) =>
-    nextMessage(ws, (m) => m.channel === 0 && m.payload.toString().includes(`"id":${id}`))
-      .then((m) => JSON.parse(m.payload.toString('utf8')));
 
-  const requests = [
-    { id: 301, method: 'terminal.kill', params: { attack: 'kill-rpc' } },
-    { id: 302, method: 'terminal.rm', params: { attack: 'rm-rpc' } },
-    { id: 303, method: 'events.unsubscribe', params: { attack: 'unsubscribe-rpc' } },
-    { id: 304, method: 'test.echo', params: { attack: 'unknown-rpc' } },
-  ];
-  for (const request of requests) {
-    const blocked = nextReply(request.id);
-    ws.send(JSON.stringify({ jsonrpc: '2.0', ...request }));
-    assert.match((await blocked).error.message, /read-only/);
-  }
+  const attached = await rpc(ws, 200, 'terminal.attach', { terminal: 't1' });
+  assert.equal(attached.result.channel, 5);
+  const ran = await rpc(ws, 201, 'terminal.run', {});
+  assert.ok(ran.result.address);
 
-  const escaped = nextReply(305);
-  ws.send('{"jsonrpc":"2.0","id":305,"method":"terminal.\\u0072un","params":{"attack":"escaped-rpc"}}');
-  assert.match((await escaped).error.message, /read-only/);
-  const duplicate = nextReply(306);
-  ws.send('{"jsonrpc":"2.0","id":306,"method":"terminal.attach","method":"terminal.run","params":{"attack":"duplicate-rpc"}}');
-  assert.match((await duplicate).error.message, /read-only/);
-
-  const binaryRpc = JSON.stringify({
-    jsonrpc: '2.0', id: 307, method: 'terminal.run', params: { attack: 'binary-rpc' },
-  });
-  ws.send(encodeFrame(0, 0, Buffer.from(`${binaryRpc}\n`)));
-  const log = await drainCore(ws, logFile, 'rpc-attacks-drained');
-  for (const signature of ['kill-rpc', 'rm-rpc', 'unsubscribe-rpc', 'unknown-rpc', 'escaped-rpc', 'duplicate-rpc', 'binary-rpc']) {
-    assert.ok(!log.includes(signature), `${signature} reached the core`);
-  }
-  await closeSocket(ws);
-});
-
-test('read-only malformed messages are dropped without desynchronizing the core', { timeout: 15000 }, async (t) => {
-  const logFile = path.join(os.tmpdir(), `herdgate-ro-malformed-${process.pid}-${Date.now()}.log`);
-  t.after(() => rm(logFile, { force: true }));
-  const { port } = await startGateway(t, {
-    HERDR_WEB_TOKEN: 'test-rw-secret-that-is-not-logged',
-    HERDR_WEB_RO_TOKEN: 'test-ro-secret-that-is-not-logged',
-    FAKE_LOG_FILE: logFile,
-  });
-  const ws = await openSocket(port, 'test-ro-secret-that-is-not-logged');
-  await waitReady(ws);
-  let attackSequence = 0;
-
-  const checkDropped = async (data, signature, binary = true) => {
-    attackSequence += 1;
-    const before = await readCoreLog(logFile);
-    ws.send(data, { binary });
-    const log = await drainCore(ws, logFile, `malformed-drained-${attackSequence}`);
-    const newEntries = log.slice(before.length);
-    if (signature) assert.ok(!newEntries.includes(signature), `${signature} reached the core`);
-    assert.equal(ws.readyState, WebSocket.OPEN, `${signature || 'malformed frame'} closed the socket`);
-  };
-
-  await checkDropped('{not valid json; attack=invalid-json', 'invalid-json', false);
-  await checkDropped('{"jsonrpc":"2.0","id":401,"method":"terminal.run","attack":"truncated-json"', 'truncated-json', false);
-  await checkDropped('["not-a-request","array-json"]', 'array-json', false);
-  await checkDropped(JSON.stringify({ method: 'terminal.run', attack: 'missing-id' }), 'missing-id', false);
-  await checkDropped(JSON.stringify({ id: null, method: 'terminal.run', attack: 'null-id' }), 'null-id', false);
-  await checkDropped(JSON.stringify({ id: 402, method: 7, attack: 'numeric-method' }), 'numeric-method', false);
-  await checkDropped(Buffer.alloc(0), null);
-  await checkDropped(Buffer.alloc(8), null);
-
-  const shortPayload = Buffer.from('short-declared-length');
-  await checkDropped(encodeFrame(5, 0, shortPayload, shortPayload.length - 1), 'short-declared-length');
-  const longPayload = Buffer.from('long-declared-length');
-  await checkDropped(encodeFrame(5, 0, longPayload, longPayload.length + 1), 'long-declared-length');
-  await checkDropped(
-    encodeFrame(5, 0, Buffer.from('oversized-declared-length'), 16 * 1024 * 1024 + 1),
-    'oversized-declared-length',
+  ws.send(encodeFrame(5, 0, Buffer.from('input-ok')));
+  ws.send(encodeFrame(5, 3, Buffer.from('resize-ok')));
+  ws.send(encodeFrame(5, 1, Buffer.from('full-access-drained')));
+  await waitFor(
+    async () => (await readCoreLog(logFile)).includes('full-access-drained'),
+    'core did not consume the full-access frames',
   );
-  await checkDropped(encodeFrame(5, 3, Buffer.alloc(16 * 1024 * 1024 + 1, 65), 0), null);
+  const log = await readCoreLog(logFile);
+  assert.match(log, /terminal\.attach/);
+  assert.match(log, /terminal\.run/);
+  assert.match(log, /input-ok/);
+  assert.match(log, /resize-ok/);
   await closeSocket(ws);
 });
 
@@ -560,9 +399,9 @@ test('configured cores route lists, attachments and frames independently', { tim
     const listed = await rpc(ws, id, 'terminal.list', { all: true });
     assert.equal(listed.result.terminals[0].address, 't1', 'both fixtures deliberately reuse t1');
     assert.equal(listed.result.terminals[0].core, core);
-    const attached = await rpc(ws, id + 1, 'terminal.attach', { terminal: 't1', observe: true });
+    const attached = await rpc(ws, id + 1, 'terminal.attach', { terminal: 't1' });
     assert.equal(attached.result.core, core);
-    assert.equal(attached.result.observe, true);
+    assert.equal(attached.result.channel, 5);
   }
 
   alpha.send(encodeFrame(5, 0, Buffer.from('input-for-alpha')));
@@ -579,31 +418,6 @@ test('configured cores route lists, attachments and frames independently', { tim
   assert.doesNotMatch(log, /input-for-alpha core=beta|input-for-beta core=alpha/);
 
   await Promise.all([closeSocket(alpha), closeSocket(beta)]);
-});
-
-test('read-only restrictions apply on every selected core', { timeout: 10000 }, async (t) => {
-  const rw = 'test-rw-secret-that-is-not-logged';
-  const ro = 'test-ro-secret-that-is-not-logged';
-  const { port } = await startGateway(t, {
-    HC_CONNECT: '',
-    HC_CORES: 'alpha,beta',
-    PATH: await fakeHcPath(t),
-    HERDR_WEB_TOKEN: rw,
-    HERDR_WEB_RO_TOKEN: ro,
-  });
-  const sockets = [
-    await openCoreSocket(port, ro, 'alpha'),
-    await openCoreSocket(port, ro, 'beta'),
-  ];
-  await Promise.all(sockets.map(waitReady));
-  for (const [index, ws] of sockets.entries()) {
-    const blocked = await rpc(ws, 100 + index, 'terminal.run', {});
-    assert.match(blocked.error.message, /read-only/);
-    const attached = await rpc(ws, 110 + index, 'terminal.attach', { terminal: 't1', observe: false });
-    assert.equal(attached.result.observe, true);
-    assert.equal(attached.result.core, index === 0 ? 'alpha' : 'beta');
-  }
-  await Promise.all(sockets.map(closeSocket));
 });
 
 test('socket discovery filters holders and joins later cores without restart', { timeout: 10000 }, async (t) => {

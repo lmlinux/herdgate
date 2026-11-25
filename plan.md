@@ -1,4 +1,4 @@
-# Plan: observe every local herdr-core
+# Plan: connect to every local herdr-core
 
 ## Discovery
 
@@ -27,8 +27,8 @@
   legacy single-core behavior and selects the default/first discovered core.
 - This gives N children per browser for N cores. Independent channel numbers,
   RPC IDs, CREDIT, RESIZE, CLOSE and terminal addresses therefore need no
-  rewriting or cross-core multiplexing. Existing token, Origin, Host and
-  read-only enforcement remains on every connection.
+  rewriting or cross-core multiplexing. Existing token, Origin and Host checks
+  remain on every connection.
 - Validate requested core names against the current discovered/configured set;
   never accept arbitrary session names or shell command fragments.
 
@@ -39,16 +39,16 @@
   as `t2` cannot collide.
 - Label every sidebar row and the active terminal title with its core. Bind each
   `HerdView` to its terminal's own connection. Route attach, input, resize,
-  observe, kill, clear-finished and new-terminal operations to the appropriate
-  core; new terminals use the active core, falling back to `default`.
+  kill, clear-finished and new-terminal operations to the appropriate core; new
+  terminals use the active core, falling back to `default`.
 - Remove terminals and cached views for a core that disappears. Keep healthy
   cores usable when another core fails or reconnects.
 
 ## Non-goals
 
-- Observe herdr-core only. The herdr TUI world and its sockets under
+- Connect to herdr-core only. The herdr TUI world and its sockets under
   `~/.config/herdr` are not herdr-core API endpoints: do not discover, label or
-  bridge them as cores. TUI observation belongs to existing dedicated tools.
+  bridge them as cores. TUI access belongs to existing dedicated tools.
 - Remote enumeration over SSH is out of scope; explicit remote `HC_CONNECT`
   keeps its existing single-core behavior.
 
@@ -57,11 +57,11 @@
 - Extend the fake core to report its `--session` and return distinct terminal
   records. Test socket filtering/discovery (including later arrivals), core
   validation, two-core aggregation without address collisions, per-core RPC and
-  frame routing, read-only enforcement on both, and legacy `HC_CONNECT`.
+  frame routing, full-access input and resize, and legacy `HC_CONNECT`.
 - Run the existing suite plus syntax checks.
-- Start a read-only gateway against the real machine, list and observe-read
+- Start a gateway against throwaway herdr-core sessions, list and attach to
   terminals from both `default` and `shepherdr`, and capture the combined,
-  core-labeled browser view. Never send input, resize, create, kill, remove, or
-  restart operations to the real cores.
+  core-labeled browser view. Verify input, resize, create and kill only against
+  those throwaway sessions, never the live ones.
 - Update the public README with discovery, configuration, connection model and
   the no-restart behavior/limitations.

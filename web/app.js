@@ -10,7 +10,6 @@ import { HerdConnection, HerdView } from 'herdview';
 import { debounceViewResize, terminalSize } from './terminal-helpers.js';
 
 const TOKEN = window.__TOKEN__;
-const IS_RO = !!window.__RO_TOKEN__ && window.__RO_TOKEN__ === TOKEN;
 const CORE_REFRESH_MS = 5000;
 
 // ---------------------------------------------------------------- helpers
@@ -49,7 +48,6 @@ let initialAttachDone = false;
 let currentView = null;
 let currentKey = '';
 let currentCore = '';
-let observePref = IS_RO;
 
 function updateConnSummary() {
   const total = discoveredCores.length;
@@ -305,11 +303,6 @@ function setTitle(text) {
   $('term-title').textContent = text;
 }
 
-function setModeBadge(observe) {
-  if (IS_RO) return;
-  $('mode-badge').hidden = !observe;
-}
-
 // One live HerdView per [core, address], bound to the correct core connection.
 const viewsByKey = new Map();
 const VIEW_CACHE_MAX = 6;
@@ -337,7 +330,7 @@ function destroyCurrentView() {
   currentView = null;
 }
 
-async function attachTo(key, { observe = observePref } = {}) {
+async function attachTo(key) {
   const terminal = terms.get(key);
   if (!terminal) return;
   initialAttachDone = true;
@@ -350,12 +343,11 @@ async function attachTo(key, { observe = observePref } = {}) {
   if (cached && !cached.view.destroyed) {
     // A slow attach on another core may still be pending. Cancel it before
     // showing this cached view, or its late completion could steal currentView
-    // while currentCore stays here and misroute kill/observe actions.
+    // while currentCore stays here and misroute kill actions.
     ++attachGen;
     destroyCurrentView();
     showEntry(cached);
     currentView = cached.view;
-    setModeBadge(cached.view.observe);
     setTitle(displayTitle(core, address, cached.title || terminal.name));
     scheduleRender();
     return;
@@ -381,7 +373,7 @@ async function attachTo(key, { observe = observePref } = {}) {
 
   const view = new HerdView(coreEntry.connection, {
     history: 500,
-    autoFocus: !observe,
+    autoFocus: true,
     terminalOptions: {
       fontFamily: '"Maple Mono NF CN", "Sarasa Mono SC", "Noto Sans Mono CJK SC", "NSimSun", ui-monospace, monospace',
       fontSize: 13,
@@ -407,7 +399,7 @@ async function attachTo(key, { observe = observePref } = {}) {
   });
 
   try {
-    await view.attach(address, { observe });
+    await view.attach(address);
   } catch (error) {
     view.destroy();
     wrapper.remove();
@@ -432,19 +424,9 @@ async function attachTo(key, { observe = observePref } = {}) {
 
   showEntry(entry);
   currentView = view;
-  setModeBadge(observe);
   setTitle(displayTitle(core, address, terminal.name));
-  if (!observe) view.focus();
+  view.focus();
   scheduleRender();
-}
-
-if (IS_RO) {
-  $('btn-new').style.display = 'none';
-  $('btn-kill').style.display = 'none';
-  $('btn-observe').style.display = 'none';
-  clearBtn.style.display = 'none';
-  $('mode-badge').hidden = false;
-  $('mode-badge').textContent = '👁 read-only';
 }
 
 // ---------------------------------------------------------------- toolbar
@@ -454,18 +436,6 @@ function coreForNew() {
   if (discoveredCores.includes('default')) return 'default';
   return discoveredCores.find((core) => connections.get(core)?.state === 'ready') || discoveredCores[0] || '';
 }
-
-$('btn-observe').onclick = () => {
-  observePref = !observePref;
-  $('btn-observe').classList.toggle('on', observePref);
-  if (currentKey) {
-    const key = currentKey;
-    const entry = viewsByKey.get(key);
-    if (entry) evictView(entry);
-    currentView = null;
-    attachTo(key, { observe: observePref });
-  }
-};
 
 $('btn-new').onclick = async () => {
   const core = coreForNew();

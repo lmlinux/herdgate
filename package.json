@@ -1,7 +1,7 @@
 {
   "name": "herdgate",
-  "version": "0.5.3",
-  "description": "A tiny, hackable gateway + web UI for herdr-core. Every herdr client — official Windows app, shepherdr, hc CLI — drives the same core terminals; herdgate is the shared window to watch and interact with all of them. ghostty-web rendering, observe mode, read-only tokens.",
+  "version": "0.6.0",
+  "description": "A tiny, hackable gateway + web UI for herdr-core. Every herdr client — official Windows app, shepherdr, hc CLI — drives the same core terminals; herdgate is the shared window to watch and interact with all of them. ghostty-web rendering.",
   "license": "MIT",
   "type": "module",
   "main": "server/gateway.mjs",
@@ -22,8 +22,7 @@
     "ghostty-web",
     "wasm",
     "vt100",
-    "agent",
-    "observe"
+    "agent"
   ],
   "repository": {
     "type": "git",

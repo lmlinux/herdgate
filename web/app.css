@@ -190,16 +190,7 @@ body {
 }
 .grow { flex: 1; }
 
-.badge {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #2a2313;
-  color: var(--amber);
-  border: 1px solid #513f1c;
-}
-
-#btn-observe, #btn-kill {
+#btn-kill {
   height: 28px;
   padding: 0 12px;
   border: 1px solid #2b2e33;
@@ -209,8 +200,7 @@ body {
   font: 12px inherit;
   cursor: pointer;
 }
-#btn-observe.on { background: #2a2313; border-color: var(--amber); color: var(--amber); }
-#btn-observe:hover, #btn-kill:hover { border-color: #3a3d43; }
+#btn-kill:hover { border-color: #3a3d43; }
 #btn-kill { color: #f85149; }
 
 #term-container {
@@ -241,6 +231,5 @@ body {
     padding: 6px 8px;
   }
   #term-title { min-width: 0; font-size: 11px; }
-  #mode-badge { flex: none; white-space: nowrap; }
-  #btn-observe, #btn-kill { padding: 0 8px; }
+  #btn-kill { padding: 0 8px; }
 }
